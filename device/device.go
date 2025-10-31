@@ -367,7 +367,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.state.stopping.Add(1)      // RoutineReadFromTUN 的等待组计数
 	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN 的加密队列计数
 
-	// 启动 TUN 设备相关的工作协程
+	// 启动 TUN 设备 相关的工作协程
 	go device.RoutineReadFromTUN()    // 从 TUN 设备读取数据包的协程，和内核交互
 	go device.RoutineTUNEventReader() // 监听 TUN 设备事件的协程
 

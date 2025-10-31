@@ -359,27 +359,48 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	}
 }
 
+// 负责处理已经暂存在队列中的数据包，为它们分配加密参数并最终发送。
+// 这个函数是 WireGuard 数据发送路径中的关键环节，连接了 数据包暂存 和 实际加密发送 的过程。
 func (peer *Peer) SendStagedPackets() {
 top:
+	// 队列检查：首先检查暂存队列是否为空，为空则直接返回
+	// 设备状态检查：检查设备是否处于启动状态(isUp())，如果设备未启动则不发送任何数据包
 	if len(peer.queue.staged) == 0 || !peer.device.isUp() {
 		return
 	}
 
+	// 密钥对状态检查
+
+	// 获取当前密钥对：获取 Peer 当前使用的加密密钥对
 	keypair := peer.keypairs.Current()
+
+	// 如果没有可用密钥对 (keypair == nil)
+	// 或者发送的 nonce 数量已达到限制 (keypair.sendNonce.Load() >= RejectAfterMessages)
+	// 或者密钥对已过期 (time.Since(keypair.created) >= RejectAfterTime)
 	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		// 发握手：当上述任一条件满足时，调用 SendHandshakeInitiation(false) 发起新的握手来获取或更新密钥对
 		peer.SendHandshakeInitiation(false)
 		return
 	}
 
 	for {
 		var elemsContainerOOO *QueueOutboundElementsContainer
+
+		// 非阻塞接收：使用带 default 的 select 实现非阻塞地 从暂存队列接收数据包容器
 		select {
 		case elemsContainer := <-peer.queue.staged:
 			i := 0
 			for _, elem := range elemsContainer.elems {
+				// 设置 elem.peer 指向当前 Peer
 				elem.peer = peer
+
+				// 通过原子操作 keypair.sendNonce.Add(1) - 1 为每个数据包分配唯一的 nonce 值
 				elem.nonce = keypair.sendNonce.Add(1) - 1
+
+				// nonce 超限处理
+				// 当 nonce 超过限制时，将这些数据包单独收集到 elemsContainerOOO 容器中
 				if elem.nonce >= RejectAfterMessages {
+					// 将 sendNonce 锁定 在限制值 RejectAfterMessages
 					keypair.sendNonce.Store(RejectAfterMessages)
 					if elemsContainerOOO == nil {
 						elemsContainerOOO = peer.device.GetOutboundElementsContainer()
@@ -387,29 +408,38 @@ top:
 					elemsContainerOOO.elems = append(elemsContainerOOO.elems, elem)
 					continue
 				} else {
+					// 有效数据包重排：对于有效的数据包，重新组织在原容器中，移除无效包
 					elemsContainer.elems[i] = elem
 					i++
 				}
-
+				// 设置 elem.keypair 指向当前使用的密钥对
 				elem.keypair = keypair
 			}
-			elemsContainer.Lock()
-			elemsContainer.elems = elemsContainer.elems[:i]
 
+			elemsContainer.Lock()                           //容器加锁：在修改容器内容前加锁，确保线程安全
+			elemsContainer.elems = elemsContainer.elems[:i] //截断容器：根据有效数据包数量 重新设置容器大小
+
+			// 超限包重新暂存：对于 nonce 超限的数据包，调用 StagePackets 将它们重新放入暂存队列（注释说明了这可能导致包的顺序混乱）
 			if elemsContainerOOO != nil {
 				peer.StagePackets(elemsContainerOOO) // XXX: Out of order, but we can't front-load go chans
 			}
 
+			// 空容器处理：如果处理后容器为空，则 归还容器资源 并跳转到 top 重新检查条件
 			if len(elemsContainer.elems) == 0 {
 				peer.device.PutOutboundElementsContainer(elemsContainer)
 				goto top
 			}
 
 			// add to parallel and sequential queue
+			// Peer 状态检查：检查 Peer 是否仍在运行
 			if peer.isRunning.Load() {
+				// 正常发送路径：如果 Peer 运行正常，将 数据包容器 同时发送到两个队列：
+				// peer.queue.outbound.c：Peer 特定的出站队列
+				// peer.device.queue.encryption.c：设备级的加密队列
 				peer.queue.outbound.c <- elemsContainer
 				peer.device.queue.encryption.c <- elemsContainer
 			} else {
+				// 资源回收路径：如果 Peer 已不再运行，则归还所有相关资源到对象池
 				for _, elem := range elemsContainer.elems {
 					peer.device.PutMessageBuffer(elem.buffer)
 					peer.device.PutOutboundElement(elem)
@@ -417,6 +447,7 @@ top:
 				peer.device.PutOutboundElementsContainer(elemsContainer)
 			}
 
+			// 重新处理标记：如果存在重新暂存的超限包，跳转到 top 重新检查条件
 			if elemsContainerOOO != nil {
 				goto top
 			}
