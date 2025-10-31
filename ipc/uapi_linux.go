@@ -130,7 +130,7 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 
 	// 调用 底层监听器的 Accept 方法 接受 wg 工具连接
 	// 若发生错误，将错误通过通道传递并退出循环
-	// 若成功接受连接，将连接对象通过通道传递给主程序处理
+	// 若成功接受连接，将连接对象通过通道传递给 主程序处理
 	go func(l *UAPIListener) {
 		for {
 			conn, err := l.listener.Accept()

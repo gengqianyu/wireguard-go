@@ -203,6 +203,9 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
+// 它实现了从 TUN 虚拟网络设备 读取本地应用程序发出的 IP 数据包，
+// 并将这些数据包 准备好 发送到对应的 WireGuard 对等节点。
+// 它连接了 本地网络栈 和 WireGuard 的加密传输层，是整个 VPN 隧道中 数据流 出本地系统 的第一个处理点。
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
@@ -212,6 +215,7 @@ func (device *Device) RoutineReadFromTUN() {
 
 	device.log.Verbosef("Routine: TUN reader - started")
 
+	// 批量处理准备：根据 BatchSize() 初始化批量处理所需的缓冲区和数据结构
 	var (
 		batchSize   = device.BatchSize()
 		readErr     error
@@ -228,6 +232,7 @@ func (device *Device) RoutineReadFromTUN() {
 		bufs[i] = elems[i].buffer[:]
 	}
 
+	// 对象池管理：使用 defer 确保函数退出时 归还所有消息缓冲区和出站元素 到对象池，避免内存泄漏
 	defer func() {
 		for _, elem := range elems {
 			if elem != nil {
@@ -238,11 +243,11 @@ func (device *Device) RoutineReadFromTUN() {
 	}()
 
 	for {
-		// read packets
+		// read packets 批量读取：从 TUN 设备一次性读取多个数据包以提高效率
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
-				continue
+				continue //数据包过滤：跳过无效（大小小于1）的数据包
 			}
 
 			elem := elems[i]
@@ -250,12 +255,17 @@ func (device *Device) RoutineReadFromTUN() {
 
 			// lookup peer
 			var peer *Peer
+
+			// IP 版本识别：通过 检查数据包 第一个字节的高 4 位来区分 IPv4 和 IPv6 数据包
 			switch elem.packet[0] >> 4 {
 			case 4:
 				if len(elem.packet) < ipv4.HeaderLen {
 					continue
 				}
+				// 目标地址提取：根据 IP 版本提取对应的目标 IP 地址
 				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+
+				// Peer 查找：使用 allowedips.Lookup() 根据 目标 IP 地址 找到对应的 Peer
 				peer = device.allowedips.Lookup(dst)
 
 			case 6:
@@ -269,9 +279,11 @@ func (device *Device) RoutineReadFromTUN() {
 				device.log.Verbosef("Received packet with unknown IP version")
 			}
 
+			// 无效 Peer 处理：跳过未找到对应 Peer 的数据包
 			if peer == nil {
 				continue
 			}
+			// 按 Peer 分组：将属于同一个 Peer 的 数据包 收集到同一个容器中
 			elemsForPeer, ok := elemsByPeer[peer]
 			if !ok {
 				elemsForPeer = device.GetOutboundElementsContainer()
@@ -279,24 +291,36 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 			elemsForPeer.elems = append(elemsForPeer.elems, elem)
 			elems[i] = device.NewOutboundElement()
+
+			// 资源重用：为每个已处理的出站元素重新创建新的元素，以便重用缓冲区
 			bufs[i] = elems[i].buffer[:]
 		}
 
+		// 数据包发送
 		for peer, elemsForPeer := range elemsByPeer {
+			// 运行状态检查：只处理处于运行状态的 Peer 的数据包
 			if peer.isRunning.Load() {
+				// 数据包暂存：调用 StagePackets() 将数据包放入 Peer 的暂存队列
 				peer.StagePackets(elemsForPeer)
+
+				// 数据包发送：调用 SendStagedPackets() 触发数据包的实际发送过程
 				peer.SendStagedPackets()
 			} else {
+				// 资源回收：对于非运行状态的 Peer，直接归还其相关资源到对象池
 				for _, elem := range elemsForPeer.elems {
 					device.PutMessageBuffer(elem.buffer)
 					device.PutOutboundElement(elem)
 				}
 				device.PutOutboundElementsContainer(elemsForPeer)
 			}
+
+			// 清理映射：处理完成后从映射中删除 Peer 条目
 			delete(elemsByPeer, peer)
 		}
 
+		// 错误处理
 		if readErr != nil {
+			// 可恢复错误：对于 ErrTooManySegments 这类非致命错误，记录日志后继续执行
 			if errors.Is(readErr, tun.ErrTooManySegments) {
 				// TODO: record stat for this
 				// This will happen if MSS is surprisingly small (< 576)
@@ -304,6 +328,7 @@ func (device *Device) RoutineReadFromTUN() {
 				device.log.Verbosef("Dropped some packets from multi-segment read: %v", readErr)
 				continue
 			}
+			// 致命错误处理：对于其他错误，如果设备未关闭，则记录错误并触发设备关闭流程
 			if !device.isClosed() {
 				if !errors.Is(readErr, os.ErrClosed) {
 					device.log.Errorf("Failed to read packet from TUN device: %v", readErr)

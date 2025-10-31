@@ -255,19 +255,24 @@ func main() {
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)
 
-	uapi, err := ipc.UAPIListen(interfaceName, fileUAPI)
+	UAPIListener, err := ipc.UAPIListen(interfaceName, fileUAPI)
 	if err != nil {
 		logger.Errorf("Failed to listen on uapi socket: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
 
+	// 接收
 	go func() {
 		for {
-			conn, err := uapi.Accept()
+			// 从 UAPIListener.connNew 通道中接收新的 连接请求
+			conn, err := UAPIListener.Accept()
 			if err != nil {
 				errs <- err
 				return
 			}
+
+			// 启动一个新的协程，处理该 socket 连接
+			// 这里面会启动 UDP 监听
 			go device.IpcHandle(conn)
 		}
 	}()
@@ -290,7 +295,7 @@ func main() {
 
 	// clean up
 
-	uapi.Close()
+	UAPIListener.Close()
 	device.Close()
 
 	logger.Verbosef("Shutting down")

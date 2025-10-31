@@ -347,6 +347,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.queue.decryption = newInboundQueue()  // 处理入站解密数据包的队列
 
 	// start workers
+
 	// 启动工作协程
 	// 根据 CPU 核心数 创建适当数量的 工作协程，实现并行处理
 	cpus := runtime.NumCPU()
@@ -367,7 +368,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN 的加密队列计数
 
 	// 启动 TUN 设备相关的工作协程
-	go device.RoutineReadFromTUN()    // 从 TUN 设备读取数据包的协程
+	go device.RoutineReadFromTUN()    // 从 TUN 设备读取数据包的协程，和内核交互
 	go device.RoutineTUNEventReader() // 监听 TUN 设备事件的协程
 
 	return device
