@@ -548,7 +548,20 @@ func (tun *NativeTun) initFromFlags(name string) error {
 }
 
 // CreateTUN creates a Device with the provided name and MTU.
+// CreateTUN 在 Linux 系统上创建一个指定名称和 MTU 的 TUN 虚拟网络设备
+// 参数:
+//
+//	name - TUN 设备的名称
+//	mtu - 设备的最大传输单元大小
+//
+// 返回值:
+//
+//	Device - 实现了 Device 接口的 TUN 设备实例
+//	error - 操作过程中遇到的任何错误
 func CreateTUN(name string, mtu int) (Device, error) {
+	// 打开 TUN 设备克隆文件 /dev/net/tun
+	// O_RDWR: 以读写模式打开设备
+	// O_CLOEXEC: 设置文件描述符在执行新程序时自动关闭
 	nfd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -557,18 +570,29 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 
+	// 创建 ifreq 结构体并设置设备名称
 	ifr, err := unix.NewIfreq(name)
 	if err != nil {
 		return nil, err
 	}
 	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
 	// where a null write will return EINVAL indicating the TUN is up.
+
+	// 设置 TUN 设备标志：
+	// IFF_TUN: 创建三层 IP 设备 而非二层以太网设备
+	// IFF_NO_PI: 不包含数据包信息（避免额外包头）
+	// IFF_VNET_HDR: 启用 virtio 网络头部，支持性能优化和接口状态检测
+	// IFF_VNET_HDR 启用 "tun status hack" 功能，通过 routineHackListener()
+	// 检测接口状态 - 当向设备写入空数据 返回 EINVAL 时表示 TUN 接口已启用
 	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+
+	// 通过 TUNSETIFF IOCTL 命令 将设置 应用到设备
 	err = unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr)
 	if err != nil {
 		return nil, err
 	}
 
+	// 将 文件描述符 设置为非阻塞模式，防止在没有数据时阻塞 goroutine
 	err = unix.SetNonblock(nfd, true)
 	if err != nil {
 		unix.Close(nfd)
@@ -576,6 +600,11 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 
 	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
+
+	// 注意：以上步骤（打开、IOCTL配置、设置非阻塞）必须在
+	// 将 文件描述符 传递给 netpoll 相关操作之前完成
+
+	// 将 Unix 文件描述符转换为 Go 语言的 os.File 对象
 
 	fd := os.NewFile(uintptr(nfd), cloneDevicePath)
 	return CreateTUNFromFile(fd, mtu)

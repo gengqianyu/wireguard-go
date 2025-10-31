@@ -143,7 +143,7 @@ func main() {
 		// 这是为了在 Go 语言层面 操作该文件描述符
 		file := os.NewFile(uintptr(fd), "")
 
-		// 使用 文件描述符创建 TUN 设备
+		// 如果存在设备直接使用 已有的 文件描述符创建 TUN 设备
 		// CreateTUNFromFile 会基于已有的文件描述符初始化 TUN 设备结构
 		return tun.CreateTUNFromFile(file, device.DefaultMTU)
 	}()
@@ -247,7 +247,7 @@ func main() {
 		return
 	}
 
-	// 创建 WireGuard device实例
+	// 创建 WireGuard device 实例
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
