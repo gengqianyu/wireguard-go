@@ -52,59 +52,95 @@ type netTun struct {
 
 type Net netTun
 
+// 专门用于创建一个基于用户空间网络栈（netstack）的 TUN 虚拟网络设备。
+// localAddresses：要分配给 TUN 设备的本地 IP 地址列表
+// dnsServers：DNS 服务器地址列表
+// mtu：设备的最大传输单元大小
+
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
+
 	opts := stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		// 网络协议支持：配置网络栈支持 IPv4 和 IPv6 协议
+		NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+
+		// 传输协议支持：配置支持 TCP、UDP、ICMPv4 和 ICMPv6 传输协议
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
-		HandleLocal:        true,
+
+		// 表示 网络栈 可以处理发往本地地址的数据包
+		HandleLocal: true,
 	}
+
+	// TUN 设备实例化
 	dev := &netTun{
-		ep:             channel.New(1024, uint32(mtu), ""),
-		stack:          stack.New(opts),
-		events:         make(chan tun.Event, 10),
-		incomingPacket: make(chan *buffer.View),
+		ep:             channel.New(1024, uint32(mtu), ""), // 创建通道端点(ep: endpoint)：通过 channel.New() 创建一个可缓冲的通道端点，用于数据包传输
+		stack:          stack.New(opts),                    // 初始化 TCP/IP 网协议络栈：使用之前配置的选项 创建新的网络栈实例
+		events:         make(chan tun.Event, 10),           // 事件通道：创建缓冲区大小为 10 的事件通道，用于传递 TUN 设备事件
+		incomingPacket: make(chan *buffer.View),            // 数据包通道：创建用于接收传入数据包的通道
 		dnsServers:     dnsServers,
 		mtu:            mtu,
 	}
+
+	// 启用 SACK：设置 TCP SACK（选择性确认）功能，默认情况下 netstack 禁用此功能
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
+	// 性能优化：SACK 可以提高 TCP 在丢包环境下的性能
+
+	// 注册通知：为通道端点添加通知处理程序，使 设备 能够接收 状态变化通知
 	dev.notifyHandle = dev.ep.AddNotify(dev)
+
+	// 设置 网络接口控制器（NIC）
+	// 创建 NIC：在 网络栈中 创建编号为 1 的网络接口控制器，并将其绑定到之前 创建的通道端点 ep
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
+
+	// 遍历地址列表：为每个提供的本地地址执行以下操作
 	for _, ip := range localAddresses {
 		var protoNumber tcpip.NetworkProtocolNumber
+
+		// 确定协议类型：根据 IP 地址类型 选择 IPv4 或 IPv6 协议号
 		if ip.Is4() {
 			protoNumber = ipv4.ProtocolNumber
 		} else if ip.Is6() {
 			protoNumber = ipv6.ProtocolNumber
 		}
+
+		// 创建协议地址：构造包含协议类型和地址信息的 ProtocolAddress 结构体
 		protoAddr := tcpip.ProtocolAddress{
 			Protocol:          protoNumber,
 			AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 		}
+
+		// 添加地址：将地址添加到网络栈的 NIC（编号为 1）上
 		tcpipErr := dev.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
 		if tcpipErr != nil {
 			return nil, nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
 		}
+
+		// 标记支持：设置 hasV4 或 hasV6 标志，记录设备支持的 IP 协议版本
 		if ip.Is4() {
 			dev.hasV4 = true
 		} else if ip.Is6() {
 			dev.hasV6 = true
 		}
 	}
+
+	// IPv4 默认路由：如果设备支持 IPv4，添加目的为 IPv4EmptySubnet（0.0.0.0/0）的默认路由
 	if dev.hasV4 {
 		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
 	}
+	// 如果设备支持 IPv6，添加目的为 IPv6EmptySubnet（::/0）的默认路由
 	if dev.hasV6 {
 		dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
 	}
 
-	dev.events <- tun.EventUp
+	// 路由配置：所有匹配默认路由的数据包 都将通过编号为 1 的 NIC 发送
+
+	dev.events <- tun.EventUp // 发送上线事件：向设备的事件通道发送 tun.EventUp 事件，表示接口已启用
 	return dev, (*Net)(dev), nil
 }
 
