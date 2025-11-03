@@ -137,7 +137,10 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 
 // IpcSetOperation implements the WireGuard configuration protocol "set" operation.
 // See https://www.wireguard.com/xplatform/#configuration-protocol for details.
+// IpcSetOperation 是WireGuard用户空间配置接口(UAPI)的核心实现。
+// 该函数专门处理配置设置操作，负责解析并应用来自用户空间的配置参数，包括设备全局配置和对等节点(peer)配置。
 func (device *Device) IpcSetOperation(r io.Reader) (err error) {
+	// 防止了多个进程或线程同时修改 WireGuard 配置导致的数据竞争和不一致状态
 	device.ipcMutex.Lock()
 	defer device.ipcMutex.Unlock()
 
@@ -147,28 +150,39 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 		}
 	}()
 
+	// 配置初始化
 	peer := new(ipcSetPeer)
-	deviceConfig := true
+	deviceConfig := true // 设置 deviceConfig 标志为 true，表示初始状态下处理的是设备级配置
 
+	// 使用 bufio.Scanner 逐行读取配置数据
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// 空行表示配置操作结束，会执行最后的配置后处理并返回
 		if line == "" {
 			// Blank line means terminate operation.
 			peer.handlePostConfig()
 			return nil
 		}
+
+		// 每行配置被解析为键值对形式(key=value)
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			return ipcErrorf(ipc.IpcErrorProtocol, "failed to parse line %q", line)
 		}
 
+		// 特殊处理 public_key 行：
+		// 遇到第一个 public_key 时，从设备配置模式 切换到 对等节点配置模式
 		if key == "public_key" {
 			if deviceConfig {
 				deviceConfig = false
 			}
+			// 调用 peer.handlePostConfig() 处理上一个对等节点的后续配置
 			peer.handlePostConfig()
+
 			// Load/create the peer we are now configuring.
+			// 加载或创建新的对等节点对象
 			err := device.handlePublicKeyLine(peer, value)
 			if err != nil {
 				return err
@@ -176,37 +190,51 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 			continue
 		}
 
+		// 根据当前配置模式调用不同的处理函数：
 		var err error
 		if deviceConfig {
+			// deviceConfig=true 时，调用 handleDeviceLine 处理设备级配置
 			// 会启启动 udp 监听 新端口
 			err = device.handleDeviceLine(key, value)
 		} else {
+			// deviceConfig=false时，调用handlePeerLine处理对等节点级配置
 			err = device.handlePeerLine(peer, key, value)
 		}
 		if err != nil {
 			return err
 		}
 	}
-	peer.handlePostConfig()
 
+	// 配置处理完成后，调用peer.handlePostConfig() 处理最后一个对等节点的后续配置
+	peer.handlePostConfig()
+	// 检查扫描过程中是否发生 I/O 错误
 	if err := scanner.Err(); err != nil {
 		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
 	}
 	return nil
 }
 
+// 该函数专门负责处理WireGuard设备级别的配置项，是UAPI（用户空间配置接口）实现中的关键组件。
+// 它接收配置键值对，并根据不同的键 执行相应的设备配置操作。
 func (device *Device) handleDeviceLine(key, value string) error {
 	switch key {
-	case "private_key":
+	case "private_key": // 处理私钥配置
+		// 将十六进制字符串形式的私钥转换为 NoisePrivateKey 类型
 		var sk NoisePrivateKey
 		err := sk.FromMaybeZeroHex(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set private_key: %w", err)
 		}
+		// 记录verbose日志
 		device.log.Verbosef("UAPI: Updating private key")
+
+		// 调用 device.SetPrivateKey() 应用新的私钥
+		// 私钥是 WireGuard 加密通信的基础，用于身份验证和密钥交换
 		device.SetPrivateKey(sk)
 
-	case "listen_port":
+	case "listen_port": // 处理监听端口配置
+
+		// 将 字符串形式的端口号 解析为16位无符号整数
 		port, err := strconv.ParseUint(value, 10, 16)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse listen_port: %w", err)
@@ -215,31 +243,37 @@ func (device *Device) handleDeviceLine(key, value string) error {
 		// update port and rebind
 		device.log.Verbosef("UAPI: Updating listen port")
 
+		// 使用互斥锁保护对 device.net.port 的并发访问
 		device.net.Lock()
 		device.net.port = uint16(port)
 		device.net.Unlock()
 
-		// 重新绑定端口 以应用 新端口
+		// 调用 device.BindUpdate() 重新绑定 UDP 套接字以应用新端口
 		if err := device.BindUpdate(); err != nil {
 			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to set listen_port: %w", err)
 		}
 
-	case "fwmark":
+	case "fwmark": // 处理防火墙标记配置
+		// 将字符串形式的防火墙标记解析为32位无符号整数
 		mark, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "invalid fwmark: %w", err)
 		}
 
 		device.log.Verbosef("UAPI: Updating fwmark")
+
+		// 调用device.BindSetMark()应用新的防火墙标记
 		if err := device.BindSetMark(uint32(mark)); err != nil {
 			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to update fwmark: %w", err)
 		}
 
-	case "replace_peers":
+	case "replace_peers": // 处理替换所有对等节点配置
 		if value != "true" {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set replace_peers, invalid value: %v", value)
 		}
 		device.log.Verbosef("UAPI: Removing all peers")
+		// 调用device.RemoveAllPeers()移除设备的所有对等节点配置
+		// 这通常用于完全重新配置设备的对等节点列表
 		device.RemoveAllPeers()
 
 	default:
@@ -418,15 +452,19 @@ func (device *Device) IpcSet(uapiConf string) error {
 	return device.IpcSetOperation(strings.NewReader(uapiConf))
 }
 
+// IpcHandle 函数是 WireGuard 用户空间配置接口(UAPI)的核心处理函数。
+// 该函数负责处理通过套接字连接接收到的配置命令，并执行相应的操作（设置或获取配置），然后返回操作结果。
 func (device *Device) IpcHandle(socket net.Conn) {
 	defer socket.Close()
 
+	// 创建带缓冲的读写器 bufio.ReadWriter 提高I/O效率
 	buffered := func(s io.ReadWriter) *bufio.ReadWriter {
 		reader := bufio.NewReader(s)
 		writer := bufio.NewWriter(s)
 		return bufio.NewReadWriter(reader, writer)
 	}(socket)
 
+	// 不断从套接字读取命令并处理：
 	for {
 		op, err := buffered.ReadString('\n')
 		if err != nil {
@@ -435,9 +473,18 @@ func (device *Device) IpcHandle(socket net.Conn) {
 
 		// handle operation
 		switch op {
+		// set=1：设置 WireGuard 设备和对等节点(peer)的配置
+		// 调用 IpcSetOperation 处理详细配置参数
+		// 可以设置私钥、监听端口、防火墙标记、对等节点列表等
 		case "set=1\n":
 			err = device.IpcSetOperation(buffered.Reader)
+
+			// get=1：获取当前 WireGuard 设备的完整配置和状态信息
+			// 首先验证命令格式是否正确（后面必须只有换行符）
+			// 调用 IpcGetOperation 收集并返回配置信息
+			// 返回的信息包括设备状态、对等节点列表、每个对等节点的连接统计等
 		case "get=1\n":
+			// 验证get命令格式
 			var nextByte byte
 			nextByte, err = buffered.ReadByte()
 			if err != nil {
@@ -454,6 +501,11 @@ func (device *Device) IpcHandle(socket net.Conn) {
 		}
 
 		// write status
+
+		// 标准化的错误处理机制，将各种错误转换为特定的错误码
+		// 通过errno响应格式返回操作结果，errno=0表示成功
+		// 所有响应后都有两个连续的换行符作为结束标志
+		// 使用Flush()确保所有响应数据都被写入套接字
 		var status *IPCError
 		if err != nil && !errors.As(err, &status) {
 			// shouldn't happen

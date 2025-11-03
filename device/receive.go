@@ -69,6 +69,9 @@ func (peer *Peer) keepKeyFreshReceiving() {
  * Every time the bind is updated a new routine is started for
  * IPv4 and IPv6 (separately)
  */
+
+// 负责 接收和解包 传入的 WireGuard 数据包，并根据 数据包类型 分发到不同的处理队列。
+// 这个函数通常以 goroutine 形式运行，是 WireGuard 协议栈中处理入站流量的第一道关卡。
 func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
 	recvName := recv.PrettyName()
 	defer func() {
@@ -82,6 +85,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 	// receive datagrams until conn is closed
 
+	// 初始化用于批量接收数据包的缓冲区数组，并从设备的缓冲区池中获取内存，避免频繁的内存分配和 GC。
 	var (
 		bufsArrs    = make([]*[MaxMessageSize]byte, maxBatchSize)
 		bufs        = make([][]byte, maxBatchSize)
@@ -93,6 +97,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, maxBatchSize)
 	)
 
+	// 批量处理优化 函数使用批量接收和处理机制，通过 maxBatchSize 参数控制一次处理的数据包数量，显著提高了处理效率，减少了系统调用次数。
+	// 内存池化管理 通过 GetMessageBuffer 和 PutMessageBuffer 方法从设备的内存池中获取和释放缓冲区，有效减少了 GC 压力，提高了性能。
 	for i := range bufsArrs {
 		bufsArrs[i] = device.GetMessageBuffer()
 		bufs[i] = bufsArrs[i][:]
@@ -106,6 +112,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		}
 	}()
 
+	// 持续调用传入的 recv 函数接收数据包，并在出现错误时进行相应处理。
+	// 使用 deathSpiral 计数器 防止在网络错误时 过度重试。
 	for {
 		count, err = recv(bufs, sizes, endpoints)
 		if err != nil {
@@ -136,20 +144,22 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			packet := bufsArrs[i][:size]
 			msgType := binary.LittleEndian.Uint32(packet[:4])
 
+			// 数据包类型处理 函数根据数据包类型（通过前 4 字节判断）
 			switch msgType {
 
 			// check if transport
-
+			// 传输类型 数据包 (MessageTransportType)：
 			case MessageTransportType:
+				// 查找对应的密钥对，创建入站元素，并按对等节点分类存储。
 
 				// check size
-
+				// 检查数据包大小
 				if len(packet) < MessageTransportSize {
 					continue
 				}
 
 				// lookup key pair
-
+				// 查找对应的密钥对
 				receiver := binary.LittleEndian.Uint32(
 					packet[MessageTransportOffsetReceiver:MessageTransportOffsetCounter],
 				)
@@ -166,6 +176,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				}
 
 				// create work element
+				// 创建 工作元素 并添加到对等节点队列
 				peer := value.peer
 				elem := device.GetInboundElement()
 				elem.packet = packet
@@ -188,6 +199,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			// otherwise it is a fixed size & handshake related packet
 
 			case MessageInitiationType:
+				// 检查数据包大小
+				// 没问题就执行下面的 select 添加到握手队列
 				if len(packet) != MessageInitiationSize {
 					continue
 				}
@@ -209,6 +222,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 			select {
 			case device.queue.handshake.c <- QueueHandshakeElement{
+				// 更新缓冲区
 				msgType:  msgType,
 				buffer:   bufsArrs[i],
 				packet:   packet,
@@ -219,6 +233,9 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			default:
 			}
 		}
+
+		// 将处理后的 数据包成员 分发到相应的 对等节点入站队列 和 设备解密队列。
+		// 然后会有对应的携程 消费队列 去处理数据包
 		for peer, elemsContainer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				peer.queue.inbound.c <- elemsContainer

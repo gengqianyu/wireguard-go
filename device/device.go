@@ -517,16 +517,20 @@ func (device *Device) BindSetMark(mark uint32) error {
 	return nil
 }
 
+// 负责更新 WireGuard 网络设备的 网络绑定 配置。
 func (device *Device) BindUpdate() error {
+	// 通过互斥锁确保网络配置更新过程的 线程安全，防止并发访问导致的数据竞争。
 	device.net.Lock()
 	defer device.net.Unlock()
 
 	// close existing sockets
+	// 调用 closeBindLocked 函数关闭设备当前使用的所有网络套接字，为后续重新绑定做准备。
 	if err := closeBindLocked(device); err != nil {
 		return err
 	}
 
 	// open new sockets
+	// 如果设备当前处于非活动状态，则无需进行重新绑定操作，直接返回。
 	if !device.isUp() {
 		return nil
 	}
@@ -536,13 +540,16 @@ func (device *Device) BindUpdate() error {
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
 
-	// 启动新的端口绑定
+	// 通过设备的绑定接口 打开新的网络套接字，并获取对应的 接收函数列表。
+	// 如果绑定失败，将端口重置为 0 并返回错误。
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
 	if err != nil {
 		netc.port = 0
 		return err
 	}
 
+	// 为设备 启动 路由变化监听机制，用于自动响应系统路由表的变化。
+	// 如果启动失败，清理已创建的绑定资源。
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
 		netc.bind.Close()
@@ -551,6 +558,7 @@ func (device *Device) BindUpdate() error {
 	}
 
 	// set fwmark
+	// 如果配置了防火墙标记（fwmark），则将其应用到网络绑定上，用于系统级别的流量过滤和路由策略。
 	if netc.fwmark != 0 {
 		err = netc.bind.SetMark(netc.fwmark)
 		if err != nil {
@@ -559,6 +567,7 @@ func (device *Device) BindUpdate() error {
 	}
 
 	// clear cached source addresses
+	// 在读取锁保护下，标记 所有对等节点的端点源地址 需要被清除，确保网络配置更新后使用新的源地址。
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.markEndpointSrcForClearing()
@@ -566,6 +575,8 @@ func (device *Device) BindUpdate() error {
 	device.peers.RUnlock()
 
 	// start receiving routines
+	// 为每个网络接收函数 启动一个独立的 goroutine 来处理入站流量，
+	// 这些 goroutine 将调用 RoutineReceiveIncoming 函数进行实际的数据接收和处理。
 	device.net.stopping.Add(len(recvFns))
 	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
 	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake

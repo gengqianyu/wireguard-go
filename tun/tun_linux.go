@@ -607,6 +607,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// 将 Unix 文件描述符转换为 Go 语言的 os.File 对象
 
 	fd := os.NewFile(uintptr(nfd), cloneDevicePath)
+
+	// 调用 CreateTUNFromFile 完成后续初始化 并返回设备实例
 	return CreateTUNFromFile(fd, mtu)
 }
 
