@@ -123,6 +123,8 @@ func createNetlinkSocket() (int, error) {
 	return sock, nil
 }
 
+// 主要负责在 Linux 系统上通过 netlink 协议监听 TUN 设备的状态变化。
+// 该方法作为一个独立的 goroutine 运行，持续监控网络接口的状态，并在发生变化时通过事件通道通知 WireGuard 主程序。
 func (tun *NativeTun) routineNetlinkListener() {
 	defer func() {
 		unix.Close(tun.netlinkSock)
@@ -613,37 +615,44 @@ func CreateTUN(name string, mtu int) (Device, error) {
 }
 
 // CreateTUNFromFile creates a Device from an os.File with the provided MTU.
+// 负责 从已有的文件对象 创建和初始化 TUN 虚拟网络设备。
+// 该 函数 接收一个已打开的 os.File 对象 和指定的 MTU 值，返回一个实现了 Device 接口的 NativeTun 设备实例。
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
+	// 创建 NativeTun 结构体实例 并初始化各项字段：
 	tun := &NativeTun{
-		tunFile:                 file,
-		events:                  make(chan Event, 5),
-		errors:                  make(chan error, 5),
-		statusListenersShutdown: make(chan struct{}),
-		tcpGROTable:             newTCPGROTable(),
-		udpGROTable:             newUDPGROTable(),
-		toWrite:                 make([]int, 0, conn.IdealBatchSize),
+		tunFile:                 file,                                //保存传入的文件对象
+		events:                  make(chan Event, 5),                 // 创建用于传递设备事件的带缓冲通道（
+		errors:                  make(chan error, 5),                 // 创建用于传递错误信息的带缓冲通道
+		statusListenersShutdown: make(chan struct{}),                 // 创建用于通知监听器关闭的通道
+		tcpGROTable:             newTCPGROTable(),                    // 初始化 TCP 分段重组表
+		udpGROTable:             newUDPGROTable(),                    // 初始化 UDP 分段重组表
+		toWrite:                 make([]int, 0, conn.IdealBatchSize), // 初始化用于批处理写操作的索引切片
 	}
 
+	// 获取设备名称并初始化设备标志
 	name, err := tun.Name()
 	if err != nil {
 		return nil, err
 	}
-
+	// 调用 tun.initFromFlags() 根据设备标志初始化设备特性（如是否支持VIRTIO头部、批处理大小等）
 	err = tun.initFromFlags(name)
 	if err != nil {
 		return nil, err
 	}
 
 	// start event listener
+	// 获取 网络接口索引（通过 SIOCGIFINDEX ioctl）
 	tun.index, err = getIFIndex(name)
 	if err != nil {
 		return nil, err
 	}
 
+	// 创建 netlink 套接字 用于监听网络接口状态变化
 	tun.netlinkSock, err = createNetlinkSocket()
 	if err != nil {
 		return nil, err
 	}
+	// 为 netlink 套接字创建取消读取功能，用于在需要时及时关闭监听
 	tun.netlinkCancel, err = rwcancel.NewRWCancel(tun.netlinkSock)
 	if err != nil {
 		unix.Close(tun.netlinkSock)
@@ -651,7 +660,12 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	}
 
 	tun.hackListenerClosed.Lock()
+
+	// routineNetlinkListener(): 通过 netlink 协议 监听接口状态变化（如接口上线/下线、MTU变更等）
+	// 这里面检测到接口 状态变化 后 会 触发 events 通道 发送 对应事件，这样消费端就可以启动 UDP 监听了
 	go tun.routineNetlinkListener()
+
+	// routineHackListener(): 提供一种跨网络命名空间检测接口状态的替代方法（通过向设备写入空数据并检测错误类型）
 	go tun.routineHackListener() // cross namespace
 
 	err = tun.setMTU(mtu)

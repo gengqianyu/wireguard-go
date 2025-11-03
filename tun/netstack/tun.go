@@ -140,7 +140,9 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 
 	// 路由配置：所有匹配默认路由的数据包 都将通过编号为 1 的 NIC 发送
 
-	dev.events <- tun.EventUp // 发送上线事件：向设备的事件通道发送 tun.EventUp 事件，表示接口已启用
+	// 发送启动事件：向设备的事件通道发送 tun.EventUp 事件，表示接口已启用
+	// 事件接收方通过 for event := range device.tun.device.Events() 监听该事件，并执行相应的启动逻辑
+	dev.events <- tun.EventUp
 	return dev, (*Net)(dev), nil
 }
 
