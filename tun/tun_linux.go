@@ -127,20 +127,24 @@ func createNetlinkSocket() (int, error) {
 // 该方法作为一个独立的 goroutine 运行，持续监控网络接口的状态，并在发生变化时通过事件通道通知 WireGuard 主程序。
 func (tun *NativeTun) routineNetlinkListener() {
 	defer func() {
-		unix.Close(tun.netlinkSock)
-		tun.hackListenerClosed.Lock()
-		close(tun.events)
-		tun.netlinkCancel.Close()
+		unix.Close(tun.netlinkSock)   // 关闭 netlink 套接字以释放系统资源
+		tun.hackListenerClosed.Lock() // 获取 hackListenerClosed 锁，防止并发访问冲突
+		close(tun.events)             // 关闭 events 通道，通知所有监听器
+		tun.netlinkCancel.Close()     // 关闭 netlinkCancel 对象，释放相关资源
 	}()
 
+	// 创建一个 64KB 大小的缓冲区用于接收 netlink 消息
 	for msg := make([]byte, 1<<16); ; {
 		var err error
 		var msgn int
+
+		// 进入无限循环，持续接收 netlink 消息
 		for {
 			msgn, _, _, _, err = unix.Recvmsg(tun.netlinkSock, msg[:], nil, 0)
 			if err == nil || !rwcancel.RetryAfterError(err) {
 				break
 			}
+			// 实现了错误重试机制：如果遇到可重试的错误且 netlinkCancel 准备好继续读取，则重试
 			if !tun.netlinkCancel.ReadyRead() {
 				tun.errors <- fmt.Errorf("netlink socket closed: %w", err)
 				return
@@ -151,6 +155,10 @@ func (tun *NativeTun) routineNetlinkListener() {
 			return
 		}
 
+		// 次收到消息后，检查是否收到关闭通知：
+		// 如果 statusListenersShutdown 通道已关闭，表示需要停止监听，方法退出
+		// 否则继续处理收到的消息
+
 		select {
 		case <-tun.statusListenersShutdown:
 			return
@@ -158,10 +166,12 @@ func (tun *NativeTun) routineNetlinkListener() {
 		}
 
 		wasEverUp := false
+		// 消息解析与事件分发
 		for remain := msg[:msgn]; len(remain) >= unix.SizeofNlMsghdr; {
-
+			// 解析 netlink 消息头
 			hdr := *(*unix.NlMsghdr)(unsafe.Pointer(&remain[0]))
 
+			// 对消息类型进行判断和处理
 			if int(hdr.Len) > len(remain) {
 				break
 			}
@@ -170,17 +180,19 @@ func (tun *NativeTun) routineNetlinkListener() {
 			case unix.NLMSG_DONE:
 				remain = []byte{}
 
-			case unix.RTM_NEWLINK:
+			case unix.RTM_NEWLINK: // 特别关注 RTM_NEWLINK 类型的消息，这表示 网络接口状态 发生变化
 				info := *(*unix.IfInfomsg)(unsafe.Pointer(&remain[unix.SizeofNlMsghdr]))
 				remain = remain[hdr.Len:]
-
+				// 检查接口索引，确保只处理当前 TUN 设备的消息
 				if info.Index != tun.index {
 					// not our interface
 					continue
 				}
 
+				// 根据接口标志位 IFF_RUNNING 判断接口 是上线还是下线，并发送相应事件
 				if info.Flags&unix.IFF_RUNNING != 0 {
 					tun.events <- EventUp
+					// 维护 wasEverUp 标志，避免在初始化阶段出现竞态条件
 					wasEverUp = true
 				}
 
@@ -192,7 +204,7 @@ func (tun *NativeTun) routineNetlinkListener() {
 						tun.events <- EventDown
 					}
 				}
-
+				// 无论状态如何变化，都会发送 EventMTUUpdate 事件
 				tun.events <- EventMTUUpdate
 
 			default:
