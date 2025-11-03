@@ -157,9 +157,10 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 	// 使用 bufio.Scanner 逐行读取配置数据
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
+		// 获取行文本内容
 		line := scanner.Text()
 
-		// 空行表示配置操作结束，会执行最后的配置后处理并返回
+		// 空行 表示配置操作结束，会执行最后的配置后处理并返回
 		if line == "" {
 			// Blank line means terminate operation.
 			peer.handlePostConfig()
@@ -464,7 +465,7 @@ func (device *Device) IpcHandle(socket net.Conn) {
 		return bufio.NewReadWriter(reader, writer)
 	}(socket)
 
-	// 不断从套接字读取命令并处理：
+	// 不断从套接字 读取命令 并处理：
 	for {
 		op, err := buffered.ReadString('\n')
 		if err != nil {
@@ -482,7 +483,7 @@ func (device *Device) IpcHandle(socket net.Conn) {
 			// get=1：获取当前 WireGuard 设备的完整配置和状态信息
 			// 首先验证命令格式是否正确（后面必须只有换行符）
 			// 调用 IpcGetOperation 收集并返回配置信息
-			// 返回的信息包括设备状态、对等节点列表、每个对等节点的连接统计等
+			// 返回的信息 包括设备状态、对等节点列表、每个对等节点的连接统计等
 		case "get=1\n":
 			// 验证get命令格式
 			var nextByte byte

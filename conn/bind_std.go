@@ -21,6 +21,7 @@ import (
 )
 
 var (
+	// 强制编译器检查 *StdNetBind 是否真的实现了 Bind 接口：
 	_ Bind = (*StdNetBind)(nil)
 )
 
@@ -119,13 +120,20 @@ func (e *StdNetEndpoint) DstToString() string {
 	return e.AddrPort.String()
 }
 
+// 用于创建特定网络类型的 UDP 监听连接。这里指的是 udp4 或 udp6。
+// 该函数封装了 底层网络监听 创建逻辑，并处理了端口绑定和地址解析等细节
 func listenNet(network string, port int) (*net.UDPConn, int, error) {
-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+	// 调用 listenConfig() 获取一个配置了平台特定优化的 net.ListenConfig 对象
+	conn, err := listenConfig().
+		// 使用这个配置对象的 ListenPacket 方法 创建一个 UDP 监听连接
+		ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
 	}
 
 	// Retrieve port.
+	// 当 指定端口为 0 时，系统会自动分配一个可用端口。
+	// 这段代码 通过解析实际绑定的 本地地址，获取 系统分配的 端口号。
 	laddr := conn.LocalAddr()
 	uaddr, err := net.ResolveUDPAddr(
 		laddr.Network(),
@@ -134,22 +142,28 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	// 将通用的 net.PacketConn 接口转换为具体的 *net.UDPConn 类型，并返回连接对象、实际端口号和错误状态。
 	return conn.(*net.UDPConn), uaddr.Port, nil
 }
 
 func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
+	// 通过 互斥锁 确保网络绑定操作的线程安全，防止并发访问导致的数据竞争。
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var err error
 	var tries int
 
+	// 检查绑定是否已经打开，如果是则返回错误，避免重复打开。
 	if s.ipv4 != nil || s.ipv6 != nil {
 		return nil, 0, ErrBindAlreadyOpen
 	}
 
 	// Attempt to open ipv4 and ipv6 listeners on the same port.
 	// If uport is 0, we can retry on failure.
+	// IPv4 和 IPv6 监听端点创建
+	// 尝试在指定端口（或自动选择端口）上同时创建 IPv4 和 IPv6 的 UDP 监听端点。
+	// 函数使用 listenNet 辅助函数来实际创建网络连接。
 again:
 	port := int(uport)
 	var v4conn, v6conn *net.UDPConn
@@ -163,6 +177,8 @@ again:
 
 	// Listen on the same port as we're using for ipv4.
 	v6conn, port, err = listenNet("udp6", port)
+	// 当指定端口为 0（自动选择端口）且遇到地址已使用错误时，实现了一个最大重试 100 次的机制，以尝试找到一个可用端口。
+	// 这是一种提高端口分配成功率的容错设计。
 	if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
 		v4conn.Close()
 		tries++
@@ -172,7 +188,9 @@ again:
 		v4conn.Close()
 		return nil, 0, err
 	}
+
 	var fns []ReceiveFunc
+	// 检测当 前网络连接 是否支持 UDP 卸载功能（如校验和计算卸载），这是一种性能优化措施，可以将一些网络处理任务 从 CPU 卸载到 网络硬件。
 	if v4conn != nil {
 		s.ipv4TxOffload, s.ipv4RxOffload = supportsUDPOffload(v4conn)
 		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
@@ -184,10 +202,14 @@ again:
 	}
 	if v6conn != nil {
 		s.ipv6TxOffload, s.ipv6RxOffload = supportsUDPOffload(v6conn)
+		// 在 Linux 和 Android 平台上，创建特定的数据包连接对象，可能用于后续的高级网络操作或性能优化。
 		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 			v6pc = ipv6.NewPacketConn(v6conn)
 			s.ipv6PC = v6pc
 		}
+
+		// 为 每个成功创建的网络连接 生成对应的 接收函数，并将这些 函数 添加到返回列表中。
+		// 这些 接收函数 稍后会被传递给 RoutineReceiveIncoming 协程 用于实际的数据接收。
 		fns = append(fns, s.makeReceiveIPv6(v6pc, v6conn, s.ipv6RxOffload))
 		s.ipv6 = v6conn
 	}

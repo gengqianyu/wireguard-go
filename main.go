@@ -158,7 +158,7 @@ func main() {
 		}
 	}
 	// 设置日志记录器
-	// 使用接口名称作为日志前缀，方便多设备环境下的日志识别
+	// 使用接口名称 作为日志前缀，方便多设备环境下的日志识别
 	logger := device.NewLogger(
 		logLevel,
 		fmt.Sprintf("(%s) ", interfaceName),
@@ -247,7 +247,8 @@ func main() {
 		return
 	}
 
-	// 创建 WireGuard device 实例
+	// 创建 WireGuard device 实例, 这里面会启动 UDP 端口监听，用于 接收和发送加密的 VPN 流量
+	// 参数 conn.NewDefaultBind() 会创建一个 默认的 绑定接口 实例，也就是 StdNetBind 实例
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
@@ -255,7 +256,7 @@ func main() {
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)
 
-	// 创建 UAPI 监听器
+	// 创建 UAPI 监听器，用于 wg 命令行工具等外部程序 与 wireguard-go 进程进行通信
 	UAPIListener, err := ipc.UAPIListen(interfaceName, fileUAPI)
 	if err != nil {
 		logger.Errorf("Failed to listen on uapi socket: %v", err)
@@ -265,7 +266,7 @@ func main() {
 	// 接收
 	go func() {
 		for {
-			// 从 UAPIListener.connNew 通道中接收新的 连接请求
+			// 从 UAPIListener.connNew 通道中接收 新的连接请求
 			conn, err := UAPIListener.Accept()
 			if err != nil {
 				errs <- err
@@ -273,7 +274,7 @@ func main() {
 			}
 
 			// 启动一个新的协程，处理该 socket 连接
-			// 这里面会启动 UDP 监听
+			// 处理 wg 命令行工具发起的各种配置请求，包括重新绑定 UDP 端口等
 			go device.IpcHandle(conn)
 		}
 	}()

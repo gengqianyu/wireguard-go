@@ -52,7 +52,7 @@ type netTun struct {
 
 type Net netTun
 
-// 专门用于创建一个基于用户空间网络栈（netstack）的 TUN 虚拟网络设备。
+// 专门用于创建一个基于 用户空间网络栈（netstack）的 TUN 虚拟网络设备。
 // localAddresses：要分配给 TUN 设备的本地 IP 地址列表
 // dnsServers：DNS 服务器地址列表
 // mtu：设备的最大传输单元大小

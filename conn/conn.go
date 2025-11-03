@@ -31,10 +31,16 @@ type ReceiveFunc func(packets [][]byte, sizes []int, eps []Endpoint) (n int, err
 //
 // A Bind interface may also be a PeekLookAtSocketFd or BindSocketToInterface,
 // depending on the platform-specific implementation.
+
+//  Bind 接口的核心功能：同时处理 IPv6 和 IPv4 的 UDP 网络流量
+//  Bind 接口的扩展性：根据不同平台的实现，它还可能实现其他接口（PeekLookAtSocketFd 或 BindSocketToInterface）
+
+// Bind 接口：纯粹的软件抽象，定义在 wireguard-go 的代码层，负责管理 UDP 套接字、处理数据包的发送和接收，是 WireGuard 协议实现的网络通信基础。
 type Bind interface {
 	// Open puts the Bind into a listening state on a given port and reports the actual
 	// port that it bound to. Passing zero results in a random selection.
 	// fns is the set of functions that will be called to receive packets.
+	// 它负责将 Bind 实例置于监听状态，使其能够接收来自网络的 UDP 数据包。
 	Open(port uint16) (fns []ReceiveFunc, actualPort uint16, err error)
 
 	// Close closes the Bind listener.

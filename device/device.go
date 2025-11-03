@@ -139,6 +139,7 @@ func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
 func (device *Device) changeState(want deviceState) (err error) {
 	device.state.Lock()
 	defer device.state.Unlock()
+
 	old := device.deviceState()
 	if old == deviceStateClosed {
 		// once closed, always closed
@@ -150,6 +151,7 @@ func (device *Device) changeState(want deviceState) (err error) {
 		return nil
 	case deviceStateUp:
 		device.state.state.Store(uint32(deviceStateUp))
+		// 这里会 调用 device.upLocked() 会调用 device.BindUpdate() 来重新绑定 UDP 套接字
 		err = device.upLocked()
 		if err == nil {
 			break
@@ -291,10 +293,10 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 // 1.出站数据流程：
 // 	操作系统通过 TUN 设备将数据包传递给 WireGuard
 // 	WireGuard 加密这些数据包
-// 	通过 bind 接口发送加密后的 UDP 数据包到对端 WireGuard 节点
+// 	通过 bind 接口 发送加密后的 UDP 数据包 到对端 WireGuard 节点
 
 // 2.入站数据流程：
-//  bind 接口接收来自对端的 UDP 数据包
+//  bind 接口 接收来自对端的 UDP 数据包
 //  WireGuard 解密这些数据包
 //  通过 TUN 设备将解密后的原始数据包传递给操作系统
 
@@ -368,8 +370,9 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN 的加密队列计数
 
 	// 启动 TUN 设备 相关的工作协程
-	go device.RoutineReadFromTUN()    // 从 TUN 设备读取数据包的协程，和内核交互
-	go device.RoutineTUNEventReader() // 监听 TUN 设备事件的协程
+	go device.RoutineReadFromTUN() // 从 TUN 设备读取数据包的协程，和内核交互
+
+	go device.RoutineTUNEventReader() //重点*** 监听 TUN 设备事件的协程，当收到 device up/down 事件时，启动(同时会执行 udp 套接字 端口监听绑定)或关闭设备
 
 	return device
 }
@@ -524,13 +527,13 @@ func (device *Device) BindUpdate() error {
 	defer device.net.Unlock()
 
 	// close existing sockets
-	// 调用 closeBindLocked 函数关闭设备当前使用的所有网络套接字，为后续重新绑定做准备。
+	// 调用 closeBindLocked 函数 关闭设备 当前使用的所有网络套接字，为后续重新绑定做准备。
 	if err := closeBindLocked(device); err != nil {
 		return err
 	}
 
 	// open new sockets
-	// 如果设备当前处于非活动状态，则无需进行重新绑定操作，直接返回。
+	// 如果 设备 当前处于非活动状态，则无需进行重新绑定操作，直接返回。
 	if !device.isUp() {
 		return nil
 	}
@@ -538,10 +541,12 @@ func (device *Device) BindUpdate() error {
 	// bind to new port
 	var err error
 	var recvFns []conn.ReceiveFunc
+
+	// 获取 net 结构体的引用，方便后续操作
 	netc := &device.net
 
-	// 通过设备的绑定接口 打开新的网络套接字，并获取对应的 接收函数列表。
-	// 如果绑定失败，将端口重置为 0 并返回错误。
+	// 通过 设备的绑定接口 打开新的网络套接字，并获取对应的 接收函数列表。
+	// 这里就是创建 UDP 监听套接字 的关键步骤。
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
 	if err != nil {
 		netc.port = 0

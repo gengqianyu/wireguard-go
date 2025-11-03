@@ -13,8 +13,8 @@ import (
 
 const DefaultMTU = 1420
 
-// 专门负责监听并处理 TUN 设备的各种事件。
-// 该函数作为一个长期运行的 goroutine，是 WireGuard 设备状态管理 和 网络参数更新 的关键组件。
+// 专门负责监听 并处理 TUN 设备的各种事件。比如启动 设备（包含绑定 UDP 套接字 监听）、关闭设备、MTU 更新等。
+// 该函数 作为一个长期运行的 goroutine，是 WireGuard 设备状态管理 和 网络参数更新 的关键组件。
 func (device *Device) RoutineTUNEventReader() {
 	device.log.Verbosef("Routine: event worker - started")
 
@@ -56,6 +56,7 @@ func (device *Device) RoutineTUNEventReader() {
 		// 启动设备
 		if event&tun.EventUp != 0 {
 			device.log.Verbosef("Interface up requested")
+			//****重点中的重点， 启动设备，还会调用 device.upLocked() 来启动设备的其他逻辑，包括 device.BindUpdate() 来绑定 UDP 套接字的逻辑
 			device.Up()
 		}
 
