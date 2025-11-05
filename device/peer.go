@@ -133,6 +133,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	}
 	peer.endpoint.Unlock()
 
+	// peer 发送数据到 endpoint
 	err := peer.device.net.bind.Send(buffers, endpoint)
 	if err == nil {
 		var totalLen uint64
