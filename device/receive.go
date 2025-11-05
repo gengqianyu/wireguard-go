@@ -250,7 +250,13 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			// 如果 对等节点 正在运行，则将 入站元素容器 添加到 对等节点入站队列 和 设备解密队列。
 			// 否则，释放 入站元素容器 中的 所有元素 并删除该容器。
 			if peer.isRunning.Load() {
+				// RoutineReceiveIncoming → 创建elemsContainer → 发送到两个队列
+				//                                     │
+				//                                     ├──→ device.queue.decryption.c → RoutineDecryption(修改共享容器) → 设置elem.packet
+				//                                     │
+				//                                     └──→ peer.queue.inbound.c → RoutineSequentialReceiver(检查elem.packet) → 处理有效数据
 				peer.queue.inbound.c <- elemsContainer
+				// 下面方法 RoutineDecryption 会从 设备解密队列 中获取加密数据包并解密
 				device.queue.decryption.c <- elemsContainer
 			} else {
 				for _, elem := range elemsContainer.elems {
@@ -310,8 +316,10 @@ func (device *Device) RoutineDecryption(id int) {
 	}
 }
 
-/* Handles incoming packets related to handshake
- */
+/*
+Handles incoming packets related to handshake
+处理与握手相关的传入数据包
+*/
 func (device *Device) RoutineHandshake(id int) {
 	defer func() {
 		device.log.Verbosef("Routine: handshake worker %d - stopped", id)
@@ -470,6 +478,13 @@ func (device *Device) RoutineHandshake(id int) {
 	}
 }
 
+// 主要负责 顺序处理 从加密通道接收到的数据包，并将 有效数据包写入到 TUN 设备中。
+// 这是 WireGuard 协议栈中 数据接收流程的最后一环，完成 从加密隧道到本地网络栈的数据 交付。
+// 该函数在 WireGuard 协议栈的数据接收流程中 处于最后一环：
+
+// 上游：RoutineReceiveIncoming 接收原始数据包 -> RoutineDecryption 解密数据包
+// 当前：RoutineSequentialReceiver 验证并处理解密后的数据包
+// 下游：写入 TUN 设备，最终交付给本地网络栈
 func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	device := peer.device
 	defer func() {
@@ -478,32 +493,44 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	}()
 	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
 
+	// 创建 用于存储 待写入TUN设备的 缓冲区切片
 	bufs := make([][]byte, 0, maxBatchSize)
 
+	// 从对等节点的入站队列通道中接收数据包容器
 	for elemsContainer := range peer.queue.inbound.c {
 		if elemsContainer == nil {
 			return
 		}
+
+		// 处理容器中的每个数据包：
+		// 锁定容器以确保线程安全
 		elemsContainer.Lock()
 		validTailPacket := -1
 		dataPacketReceived := false
 		rxBytesLen := uint64(0)
+
+		// 遍历容器中的每个元素，进行一系列验证：
 		for i, elem := range elemsContainer.elems {
+			// 1. 检查 数据包 是否为空（解密失败）
+			// 这意味着 只有当 RoutineDecryption 成功解密 并设置了 elem.packet 字段后，该数据包才会被进一步处理。
+			// 延迟处理机制：即使 RoutineSequentialReceiver 先于解密完成获取到了容器，它也会 跳过 未解密的数据包，直到解密完成。
 			if elem.packet == nil {
 				// decryption failed
 				continue
 			}
-
+			// 2. 检查 数据包 是否在  replayFilter 中（防止重放攻击）
 			if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {
 				continue
 			}
-
+			// 3. 更新 有效数据包索引
 			validTailPacket = i
+			// 4. 检查 数据包 是否与 密钥对 匹配（确保 握手完成）
 			if peer.ReceivedWithKeypair(elem.keypair) {
 				peer.SetEndpointFromPacket(elem.endpoint)
 				peer.timersHandshakeComplete()
 				peer.SendStagedPackets()
 			}
+			// 5. 更新 接收字节数
 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
 			if len(elem.packet) == 0 {
@@ -512,8 +539,10 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			}
 			dataPacketReceived = true
 
+			// IP数据包验证与过滤：
 			switch elem.packet[0] >> 4 {
-			case 4:
+			case 4: // IPv4数据包处理
+				// 验证数据包长度是否合法
 				if len(elem.packet) < ipv4.HeaderLen {
 					continue
 				}
@@ -524,12 +553,13 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 				elem.packet = elem.packet[:length]
 				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
+				// 通过 allowedips 检查 源 IP 地址 是否被允许访问本地网络
 				if device.allowedips.Lookup(src) != peer {
 					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 					continue
 				}
 
-			case 6:
+			case 6: // IPv6数据包处理
 				if len(elem.packet) < ipv6.HeaderLen {
 					continue
 				}
@@ -554,6 +584,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
 		}
 
+		// 更新对等节点状态：
 		peer.rxBytes.Add(rxBytesLen)
 		if validTailPacket >= 0 {
 			peer.SetEndpointFromPacket(elemsContainer.elems[validTailPacket].endpoint)
@@ -561,15 +592,20 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 		}
+		// 确保密钥定期更新，保持连接安全
 		if dataPacketReceived {
 			peer.timersDataReceived()
 		}
+
+		// 将有效数据包 批量写入 TUN 设备
 		if len(bufs) > 0 {
 			_, err := device.tun.device.Write(bufs, MessageTransportOffsetContent)
+
 			if err != nil && !device.isClosed() {
 				device.log.Errorf("Failed to write packets to TUN device: %v", err)
 			}
 		}
+		// 将缓冲区和元素容器归还到对象池，实现资源复用
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutInboundElement(elem)
