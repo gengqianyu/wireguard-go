@@ -142,10 +142,14 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	// 将通用的 net.PacketConn 接口转换为具体的 *net.UDPConn 类型，并返回连接对象、实际端口号和错误状态。
+	// 将通用的 net.PacketConn 接口 转换为具体的 *net.UDPConn 类型，并返回连接对象、实际端口号和错误状态。
 	return conn.(*net.UDPConn), uaddr.Port, nil
 }
 
+// 返回值：
+// - fns：一个包含两个 ReceiveFunc 函数的切片，分别用于接收 IPv4 和 IPv6 数据包。
+// - port：实际绑定的端口号。
+// - err：如果发生错误，返回错误信息；否则为 nil。
 func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	// 通过 互斥锁 确保网络绑定操作的线程安全，防止并发访问导致的数据竞争。
 	s.mu.Lock()
@@ -170,6 +174,9 @@ again:
 	var v4pc *ipv4.PacketConn
 	var v6pc *ipv6.PacketConn
 
+	// 创建 IPv4 监听端点
+	// 尝试在指定端口（或自动选择端口）上创建 IPv4 的 UDP 监听端点。
+	// 如果失败（如地址不支持 IPv4），会记录错误信息并继续尝试。
 	v4conn, port, err = listenNet("udp4", port)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err

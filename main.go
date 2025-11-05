@@ -57,6 +57,7 @@ func warning() {
 	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────┘")
 }
 
+// sudo LOG_LEVEL=debug go run . -f utun9
 func main() {
 	// handle --version flag
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
