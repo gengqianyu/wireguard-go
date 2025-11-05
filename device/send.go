@@ -555,6 +555,10 @@ func (device *Device) RoutineEncryption(id int) {
 	}
 }
 
+// 顺序发送处理
+
+// 为 每个对等节点 维护一个专用的发送 goroutine，确保 对单个对等节点的数据包 按顺序处理
+// 避免多 goroutine 并发发送 不同 peer 流量可能导致的竞态条件和资源争用
 func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device := peer.device
 	defer func() {
@@ -580,6 +584,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			elemsContainer.Lock()
 			for _, elem := range elemsContainer.elems {
 				device.PutMessageBuffer(elem.buffer)
+
 				device.PutOutboundElement(elem)
 			}
 			device.PutOutboundElementsContainer(elemsContainer)

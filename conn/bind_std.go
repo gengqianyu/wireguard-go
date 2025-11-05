@@ -205,6 +205,7 @@ again:
 			s.ipv4PC = v4pc
 		}
 		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload))
+		// 记录监听 IPv4 连接，这个链接 后续会被用于发送数据。
 		s.ipv4 = v4conn
 	}
 	if v6conn != nil {
@@ -370,6 +371,7 @@ func (e ErrUDPGSODisabled) Unwrap() error {
 func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 	s.mu.Lock()
 	blackhole := s.blackhole4
+	// 拿到 对应的 监听连接，使用这个连接 发送数据
 	conn := s.ipv4
 	offload := s.ipv4TxOffload
 	br := batchWriter(s.ipv4PC)
@@ -411,6 +413,8 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 retry:
 	if offload {
 		n := coalesceMessages(ua, endpoint.(*StdNetEndpoint), bufs, *msgs, setGSOSize)
+
+		// Bind 接口设计：在 conn.go 中定义的 Bind 接口，其 Open 方法负责在给定端口上创建监听状态，而Send方法则使用 同一个绑定的连接 发送数据。
 		err = s.send(conn, br, (*msgs)[:n])
 		if err != nil && offload && errShouldDisableUDPGSO(err) {
 			offload = false
