@@ -310,7 +310,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	// 创建用于通知设备关闭的通道
 	device.closed = make(chan struct{})
 
-	// 初始化设备组件
+	// 初始化 device 组件，这里通过 device 桥接 TUN 设备和 bind 接口，从而实现数据流
 	device.log = logger           // 设置日志记录器
 	device.net.bind = bind        // 设置网络绑定接口
 	device.tun.device = tunDevice // 设置 TUN 设备
@@ -370,7 +370,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.state.stopping.Add(1)      // RoutineReadFromTUN 的等待组计数
 	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN 的加密队列计数
 
-	// 启动 TUN 设备 相关的工作协程
+	// 关键: 从 TUN 虚拟网络设备 读取本地应用程序发出的 IP 数据包，并准备发送到对应的 WireGuard 对等节点
 	go device.RoutineReadFromTUN() // 从 TUN 设备读取数据包的协程，和内核交互
 
 	go device.RoutineTUNEventReader() //重点*** 监听 TUN 设备事件的协程，当收到 device up/down 事件时，启动(同时会执行 udp 套接字 端口监听绑定)或关闭设备

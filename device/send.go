@@ -27,9 +27,10 @@ import (
  * 3. Nonce assignment (sequential)
  * 4. Encryption (parallel)
  * 5. Transmission (sequential)
- *
+ * 此处根据注释，Outbound 作用是处理 tun 离开电脑的数据包，并且 Encryption 过程 跟 outbound 过程有关，所以下一步我们关注 RoutineReadFromTUN 和 RoutineEncryption。
  * The functions in this file occur (roughly) in the order in
  * which the packets are processed.
+ * 此文件中的函数（大致）按照处理数据包的顺序出现。
  *
  * Locking, Producers and Consumers
  *
@@ -40,8 +41,17 @@ import (
  * workers release lock when they have completed work (encryption) on the packet.
  *
  * If the element is inserted into the "encryption queue",
+ *
  * the content is preceded by enough "junk" to contain the transport header
  * (to allow the construction of transport messages in-place)
+
+ * 锁机制、生产者与消费者
+
+ * 每个节点（peer）的数据包顺序 必须保持不变，但 数据包 的加密过程是 乱序进行的：
+ * 顺序消费者会尝试获取锁；
+ * 工作线程 在完成数据包的处理（加密）后，会释放锁。
+
+ * 若数据元素被插入到 “加密队列”（encryption queue）中，其内容前面会附带足够的 “冗余数据”（junk）以容纳传输层头部（transport header），从而支持就地构建传输层消息。
  */
 
 type QueueOutboundElement struct {
@@ -206,6 +216,9 @@ func (peer *Peer) keepKeyFreshSending() {
 // 它实现了从 TUN 虚拟网络设备 读取本地应用程序发出的 IP 数据包，
 // 并将这些数据包 准备好 发送到对应的 WireGuard 对等节点。
 // 它连接了 本地网络栈 和 WireGuard 的加密传输层，是整个 VPN 隧道中 数据流 出本地系统 的第一个处理点。
+// 与 Inbound 流量处理 不同，因为 OutBind 流量 是要发送给对应的 peer endpoint 的，
+// 每个 peer 都有一个对应的 outbound queue，和各自的加密 keypair
+// 因此 负责进一步加工发送数据的是 对应的 peer 结构体，不是 device 结构体。
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
@@ -241,6 +254,15 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 		}
 	}()
+
+	// 	Device加工（加密处理）
+
+	// WireGuard设备接收到TUN设备传来的数据包后，会进行以下处理：
+	// 根据目标IP确定对应的对等节点(Peer)
+	// 获取当前的加密密钥对(Keypair)
+	// 以下两步是在各自的 peer 中完成的
+	// 使用ChaCha20-Poly1305算法加密数据包
+	// 添加WireGuard头部信息
 
 	for {
 		// read packets 批量读取：从 TUN 设备一次性读取多个数据包以提高效率
@@ -359,7 +381,7 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	}
 }
 
-// 负责处理已经暂存在队列中的数据包，为它们分配加密参数并最终发送。
+// 负责处理已经暂存在队列中的数据包，为它们 分配加密参数 并最终发送。
 // 这个函数是 WireGuard 数据发送路径中的关键环节，连接了 数据包暂存 和 实际加密发送 的过程。
 func (peer *Peer) SendStagedPackets() {
 top:
@@ -438,6 +460,9 @@ top:
 				// peer.device.queue.encryption.c：设备级的加密队列
 				peer.queue.outbound.c <- elemsContainer
 				peer.device.queue.encryption.c <- elemsContainer
+
+				// 这里的操作正好对应 receive.go 中的 device.RoutineReceiveIncoming 里的 InBound 入栈流量操作
+
 			} else {
 				// 资源回收路径：如果 Peer 已不再运行，则归还所有相关资源到对象池
 				for _, elem := range elemsContainer.elems {
