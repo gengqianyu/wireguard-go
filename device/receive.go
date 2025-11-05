@@ -485,6 +485,13 @@ func (device *Device) RoutineHandshake(id int) {
 // 上游：RoutineReceiveIncoming 接收原始数据包 -> RoutineDecryption 解密数据包
 // 当前：RoutineSequentialReceiver 验证并处理解密后的数据包
 // 下游：写入 TUN 设备，最终交付给本地网络栈
+
+// RoutineSequentialReceiver函数中的"顺序"并不是指恢复原始网络数据包的传输顺序，而是体现在以下几个关键层面：
+// 对等节点内部处理顺序：对于单个Peer，所有解密后的数据包都在同一个goroutine中处理，避免了并发访问同一Peer状态时的竞态条件
+// 资源锁定顺序：按固定顺序获取和释放锁，防止死锁
+// 批量写入顺序：将多个数据包批量写入TUN设备时，保持它们在内存中的组织顺序
+// 状态更新顺序：确保与Peer相关的状态（如最近活动时间）按正确的逻辑顺序更新
+
 func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	device := peer.device
 	defer func() {
@@ -605,7 +612,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				device.log.Errorf("Failed to write packets to TUN device: %v", err)
 			}
 		}
-		// 将缓冲区和元素容器归还到对象池，实现资源复用
+		// 将 缓冲区 和 元素容器 归还到对象池，实现资源复用
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutInboundElement(elem)
