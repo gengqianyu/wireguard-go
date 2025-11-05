@@ -112,7 +112,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		}
 	}()
 
-	// 持续调用传入的 recv 函数接收数据包，并在出现错误时进行相应处理。
+	// 持续调用 传入的recv函数 接收数据包，并在出现错误时进行相应处理。
 	// 使用 deathSpiral 计数器 防止在网络错误时 过度重试。
 	for {
 		count, err = recv(bufs, sizes, endpoints)
@@ -134,12 +134,14 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		deathSpiral = 0
 
 		// handle each packet in the batch
+		// 遍历 批量接收的 每个数据包，检查其大小是否足够，然后根据 数据包类型 进行处理。
 		for i, size := range sizes[:count] {
+
+			// check size of packet
+			// 检查数据包大小是否足够
 			if size < MinMessageSize {
 				continue
 			}
-
-			// check size of packet
 
 			packet := bufsArrs[i][:size]
 			msgType := binary.LittleEndian.Uint32(packet[:4])
@@ -150,7 +152,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			// check if transport
 			// 传输类型 数据包 (MessageTransportType)：
 			case MessageTransportType:
-				// 查找对应的密钥对，创建入站元素，并按对等节点分类存储。
+				// 查找对应的密钥对，创建入站元素，并按 对等节点 分类存储。
 
 				// check size
 				// 检查数据包大小
@@ -160,9 +162,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 				// lookup key pair
 				// 查找对应的密钥对
-				receiver := binary.LittleEndian.Uint32(
-					packet[MessageTransportOffsetReceiver:MessageTransportOffsetCounter],
-				)
+				receiver := binary.LittleEndian.Uint32(packet[MessageTransportOffsetReceiver:MessageTransportOffsetCounter])
+
 				value := device.indexTable.Lookup(receiver)
 				keypair := value.keypair
 				if keypair == nil {
@@ -170,13 +171,13 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				}
 
 				// check keypair expiry
-
+				// 检查密钥对是否过期
 				if keypair.created.Add(RejectAfterTime).Before(time.Now()) {
 					continue
 				}
 
 				// create work element
-				// 创建 工作元素 并添加到对等节点队列
+				// 创建 工作元素 并添加到 对等节点队列
 				peer := value.peer
 				elem := device.GetInboundElement()
 				elem.packet = packet
@@ -197,7 +198,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				continue
 
 			// otherwise it is a fixed size & handshake related packet
-
+			// 否则，它是一个与握手相关的固定大小的数据包
 			case MessageInitiationType:
 				// 检查数据包大小
 				// 没问题就执行下面的 select 添加到握手队列
@@ -205,7 +206,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 					continue
 				}
 
-			case MessageResponseType:
+			case MessageResponseType: // 响应类型 数据包 (MessageResponseType)：
 				if len(packet) != MessageResponseSize {
 					continue
 				}
@@ -220,23 +221,34 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				continue
 			}
 
+			// 上面有一个隐式类型过滤：只有以下三种握手相关类型的消息能够通过 switch 语句 并到达 select 部分：
+
+			// MessageInitiationType（握手初始化消息）
+			// MessageResponseType（握手响应消息）
+			// MessageCookieReplyType（Cookie回复消息）
+			// 发送到握手通道，让 握手处理协程 去处理
+
+			// 因此，虽然在 select 语句前没有显式检查 msgType 是否为握手类型，但通过 switch-case 中的 continue 逻辑，实际上已经实现了对消息类型的过滤。
 			select {
 			case device.queue.handshake.c <- QueueHandshakeElement{
-				// 更新缓冲区
 				msgType:  msgType,
 				buffer:   bufsArrs[i],
 				packet:   packet,
 				endpoint: endpoints[i],
 			}:
+				// 更新缓冲区
 				bufsArrs[i] = device.GetMessageBuffer()
 				bufs[i] = bufsArrs[i][:]
+
 			default:
 			}
 		}
 
 		// 将处理后的 数据包成员 分发到相应的 对等节点入站队列 和 设备解密队列。
-		// 然后会有对应的携程 消费队列 去处理数据包
+		// 然后 会有对应的携程 消费队列 去处理数据包
 		for peer, elemsContainer := range elemsByPeer {
+			// 如果 对等节点 正在运行，则将 入站元素容器 添加到 对等节点入站队列 和 设备解密队列。
+			// 否则，释放 入站元素容器 中的 所有元素 并删除该容器。
 			if peer.isRunning.Load() {
 				peer.queue.inbound.c <- elemsContainer
 				device.queue.decryption.c <- elemsContainer

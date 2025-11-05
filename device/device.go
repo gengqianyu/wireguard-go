@@ -351,6 +351,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	// start workers
 
 	// 启动 device 的 worker 去处理队列中的数据
+
 	// 根据 CPU 核心数 创建适当数量的 工作协程，实现并行处理
 	cpus := runtime.NumCPU()
 	device.state.stopping.Wait()
@@ -586,6 +587,8 @@ func (device *Device) BindUpdate() error {
 	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
 	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake
 	batchSize := netc.bind.BatchSize()
+
+	// 启动 ipv4 和 ipv6 接收函数的 goroutine 来处理入站流量。
 	for _, fn := range recvFns {
 		go device.RoutineReceiveIncoming(batchSize, fn)
 	}
