@@ -251,7 +251,8 @@ func main() {
 	// 创建 WireGuard device 实例, 这里面会启动 UDP 端口监听，用于 接收和发送加密的 VPN 流量
 	// 参数 conn.NewDefaultBind() 会创建一个 默认的 绑定接口 实例，也就是 StdNetBind 实例
 	// UDP 端口监听其实是在 StdNetBind.Open 方法中实现的，这里就是一个 device 和 conn 关联起来
-	// conn 监听在指定的 UDP 端口上，收到加密的 VPN 流量后，会通过 device 处理后，发送到 TUN 虚拟网卡
+	// conn 监听在指定的 UDP 端口上，收到加密的 VPN 流量后，会通过 device 处理(加解密)后，发送到 TUN 虚拟网卡
+	// NewDevice 函数最后会启动 device 的 worker 携程 去具体处理 进/出 队列中的数据
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")

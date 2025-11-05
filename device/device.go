@@ -350,7 +350,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 
 	// start workers
 
-	// 启动工作协程
+	// 启动 device 的 worker 去处理队列中的数据
 	// 根据 CPU 核心数 创建适当数量的 工作协程，实现并行处理
 	cpus := runtime.NumCPU()
 	device.state.stopping.Wait()
