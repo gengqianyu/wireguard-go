@@ -264,33 +264,48 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	}
 }
 
+// RoutineDecryption 函数是 WireGuard 协议栈中负责解密入站数据包的核心工作协程。
+// 这个函数在独立的 goroutine 中运行，专门处理加密传输类型的数据包。
 func (device *Device) RoutineDecryption(id int) {
 	var nonce [chacha20poly1305.NonceSize]byte
 
 	defer device.log.Verbosef("Routine: decryption worker %d - stopped", id)
 	device.log.Verbosef("Routine: decryption worker %d - started", id)
 
+	// 负责从解密队列 device.queue.decryption.c 中获取加密数据包并解密
 	for elemsContainer := range device.queue.decryption.c {
+		// 从解密队列接收 QueueInboundElementsContainer 类型的数据包容器
+		// 遍历容器中的每个 QueueInboundElement 元素
 		for _, elem := range elemsContainer.elems {
 			// split message into fields
+			// 提取 计数器 和 加密内容
 			counter := elem.packet[MessageTransportOffsetCounter:MessageTransportOffsetContent]
 			content := elem.packet[MessageTransportOffsetContent:]
 
 			// decrypt and release to consumer
+			// 解析计数器值并准备 nonce
 			var err error
 			elem.counter = binary.LittleEndian.Uint64(counter)
 			// copy counter to nonce
+			// 复制计数器到 nonce
 			binary.LittleEndian.PutUint64(nonce[0x4:0xc], elem.counter)
+
+			// 使用 ChaCha20-Poly1305 加密算法 进行解密（通过 elem.keypair.receive.Open 方法）
+			// 该算法同时提供加密和认证功能，确保数据的机密性和完整性
+			// 将解密后的结果 重新存储到 elem.packet 中
 			elem.packet, err = elem.keypair.receive.Open(
-				content[:0],
-				nonce[:],
-				content,
-				nil,
+				content[:0], // 输出缓冲区（空切片 表示自动分配）
+				nonce[:],    // 12字节的 nonce 值
+				content,     // 要解密的内容
+				nil,         // 附加认证数据（此处为 nil）
 			)
 			if err != nil {
 				elem.packet = nil
 			}
 		}
+
+		// 处理完容器中的所有元素后，调用 elemsContainer.Unlock() 释放锁
+		// 这使得其他协程可以安全地访问和处理这些解密后的数据包
 		elemsContainer.Unlock()
 	}
 }
