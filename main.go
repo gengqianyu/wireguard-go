@@ -115,8 +115,8 @@ func main() {
 	// 创建 或 从已提供的文件描述符初始化 TUN 虚拟网络设备
 	// TUN 设备是一种虚拟网络设备，允许 用户空间程序 直接读写 IP 数据包
 	// 这是 WireGuard 实现 VPN 隧道功能的核心组件之一
-	tdev, err := func() (tun.Device, error) {
-		// ENV_WG_TUN_FD 常量定义为 "WG_TUN_FD"
+	tunDevice, err := func() (tun.Device, error) {
+		// 从环境变量中获取 TUN 文件描述符
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD) // get TUN fd from environment variable
 
 		// 如果环境变量中 没有提供文件描述符，则创建新的 TUN 设备
@@ -153,7 +153,7 @@ func main() {
 	// 某些平台上，实际创建的 TUN 设备名称可能与请求的不同
 	// 例如在 macOS 上，TUN 设备通常命名为 utunX 格式
 	if err == nil {
-		realInterfaceName, err2 := tdev.Name()
+		realInterfaceName, err2 := tunDevice.Name()
 		if err2 == nil {
 			interfaceName = realInterfaceName
 		}
@@ -222,7 +222,7 @@ func main() {
 				files[0], // stdin
 				files[1], // stdout
 				files[2], // stderr
-				tdev.File(),
+				tunDevice.File(),
 				fileUAPI,
 			},
 			Dir: ".",
@@ -253,7 +253,7 @@ func main() {
 	// UDP 端口监听其实是在 StdNetBind.Open 方法中实现的，这里就是一个 device 和 conn 关联起来
 	// conn 监听在指定的 UDP 端口上，收到加密的 VPN 流量后，会通过 device 处理(加解密)后，发送到 TUN 虚拟网卡
 	// NewDevice 函数最后会启动 device 的 worker 携程 去具体处理 进/出 队列中的数据
-	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+	device := device.NewDevice(tunDevice, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
 

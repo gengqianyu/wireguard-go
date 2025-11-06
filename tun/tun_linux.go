@@ -650,8 +650,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 // 该 函数 接收一个已打开的 os.File 对象 和指定的 MTU 值，返回一个实现了 Device 接口的 NativeTun 设备实例。
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	// 创建 NativeTun 结构体实例 并初始化各项字段：
-	tun := &NativeTun{
-		tunFile:                 file,                                //保存传入的文件对象
+	nativeTun := &NativeTun{
+		tunFile:                 file,                                // 保存传入的文件对象
 		events:                  make(chan Event, 5),                 // 创建用于传递设备事件的带缓冲通道（
 		errors:                  make(chan error, 5),                 // 创建用于传递错误信息的带缓冲通道
 		statusListenersShutdown: make(chan struct{}),                 // 创建用于通知监听器关闭的通道
@@ -661,51 +661,51 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	}
 
 	// 获取设备名称并初始化设备标志
-	name, err := tun.Name()
+	name, err := nativeTun.Name()
 	if err != nil {
 		return nil, err
 	}
-	// 调用 tun.initFromFlags() 根据设备标志初始化设备特性（如是否支持VIRTIO头部、批处理大小等）
-	err = tun.initFromFlags(name)
+	// 调用 nativeTun.initFromFlags() 根据设备标志初始化设备特性（如是否支持VIRTIO头部、批处理大小等）
+	err = nativeTun.initFromFlags(name)
 	if err != nil {
 		return nil, err
 	}
 
 	// start event listener
 	// 获取 网络接口索引（通过 SIOCGIFINDEX ioctl）
-	tun.index, err = getIFIndex(name)
+	nativeTun.index, err = getIFIndex(name)
 	if err != nil {
 		return nil, err
 	}
 
 	// 创建 netlink 套接字 用于监听网络接口状态变化
-	tun.netlinkSock, err = createNetlinkSocket()
+	nativeTun.netlinkSock, err = createNetlinkSocket()
 	if err != nil {
 		return nil, err
 	}
 	// 为 netlink 套接字创建取消读取功能，用于在需要时及时关闭监听
-	tun.netlinkCancel, err = rwcancel.NewRWCancel(tun.netlinkSock)
+	nativeTun.netlinkCancel, err = rwcancel.NewRWCancel(nativeTun.netlinkSock)
 	if err != nil {
-		unix.Close(tun.netlinkSock)
+		unix.Close(nativeTun.netlinkSock)
 		return nil, err
 	}
 
-	tun.hackListenerClosed.Lock()
+	nativeTun.hackListenerClosed.Lock()
 
 	// routineNetlinkListener(): 通过 netlink 协议 监听接口状态变化（如接口上线/下线、MTU变更等）
 	// 这里面检测到接口 状态变化 后 会 触发 events 通道 发送 对应事件，这样消费端就可以启动 UDP 监听了
-	go tun.routineNetlinkListener()
+	go nativeTun.routineNetlinkListener()
 
 	// routineHackListener(): 提供一种跨网络命名空间检测接口状态的替代方法（通过向设备写入空数据并检测错误类型）
-	go tun.routineHackListener() // cross namespace
+	go nativeTun.routineHackListener() // cross namespace
 
-	err = tun.setMTU(mtu)
+	err = nativeTun.setMTU(mtu)
 	if err != nil {
-		unix.Close(tun.netlinkSock)
+		unix.Close(nativeTun.netlinkSock)
 		return nil, err
 	}
 
-	return tun, nil
+	return nativeTun, nil
 }
 
 // CreateUnmonitoredTUNFromFD creates a Device from the provided file
