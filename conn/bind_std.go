@@ -204,6 +204,9 @@ again:
 			v4pc = ipv4.NewPacketConn(v4conn)
 			s.ipv4PC = v4pc
 		}
+		// 创建 IPv4 接收函数
+		// 为 IPv4 连接 创建一个 接收函数，用于处理传入的 IPv4 数据包。
+		// 这个函数 会被添加到 返回的 接收函数列表中，稍后会被用于 数据接收。
 		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload))
 		// 记录监听 IPv4 连接，这个链接 后续会被用于发送数据。
 		s.ipv4 = v4conn
@@ -225,6 +228,7 @@ again:
 		return nil, 0, syscall.EAFNOSUPPORT
 	}
 
+	// 返回 IPv4 和 IPv6 接收函数列表、实际绑定的端口号和 nil 错误。
 	return fns, uint16(port), nil
 }
 
@@ -431,6 +435,8 @@ retry:
 	// 如果启用了 UDP GSO 功能，使用 coalesceMessages 函数 将多个数据包 合并为一个 UDP 分段，
 	// 并设置 GSO 大小。
 	if offload {
+		// 数据包合并：通过 coalesceMessages 函数将多个小型 UDP 数据包 合并成一个大型 GSO 数据包
+		// GSO 大小设置：使用 setGSOSize 函数设置每个子分段的大小，通常等于 MTU 减去头部开销
 		n := coalesceMessages(ua, endpoint.(*StdNetEndpoint), bufs, *msgs, setGSOSize)
 		// Bind 接口设计：在 conn.go 中定义的 Bind 接口，其 Open 方法负责在给定端口上创建监听状态，而Send方法则使用 同一个绑定的连接 发送数据。
 		err = s.send(conn, br, (*msgs)[:n])
