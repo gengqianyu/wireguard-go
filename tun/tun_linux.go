@@ -462,30 +462,48 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 	return gsoSplit(in, hdr, bufs, sizes, offset, ipVersion == 6)
 }
 
+// 这个 函数 负责从虚拟 TUN 网络设备 读取 原始网络数据包
+// 并根据 virtio 网络头部 进行 分割和处理
+// bufs 二维字节数组，用于存储从 TUN 设备读取的数据包
+// sizes 数组 用于 返回 每个 缓冲区 实际 读取到 的 字节数
+// offset 表示 在 bufs 中 从 哪个 偏移量 开始 写入 数据
+
+// 利用了 bufs 切片不扩容的特性，直接在第一个缓冲区写入数据，避免了额外的内存分配和复制操作。
+// 直接操作切片就改变了 bufs 中的数据
 func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	// 通过 互斥锁 确保在多协程环境下的读取操作 是线程安全的。
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
+
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
+		// 默认情况下，数据将直接读入提供的第一个缓冲区（考虑偏移量）
 		readInto := bufs[0][offset:]
+
+		// 如果启用了 virtio 网络头部 (vnetHdr 为 true)，则先读入内部缓冲区进行处理
 		if tun.vnetHdr {
 			readInto = tun.readBuff[:]
 		}
+
+		// 这是 核心的读取操作，调用底层 文件描述符的 Read 方法 从 TUN 设备 读取数据。
 		n, err := tun.tunFile.Read(readInto)
+
 		if errors.Is(err, syscall.EBADFD) {
 			err = os.ErrClosed
 		}
 		if err != nil {
 			return 0, err
 		}
+
+		// 如果启用了 virtio 头部，调用专门的处理函数 handleVirtioRead
 		if tun.vnetHdr {
 			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
-		} else {
-			sizes[0] = n
-			return 1, nil
 		}
+		// 否则，直接设置第一个缓冲区的读取大小，并返回读取了 1 个数据包
+		sizes[0] = n
+		return 1, nil
 	}
 }
 
@@ -584,7 +602,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 
-	// 创建 ifreq 结构体并设置设备名称
+	// 创建 ifreq 结构体 并设置设备名称
 	ifr, err := unix.NewIfreq(name)
 	if err != nil {
 		return nil, err
@@ -596,8 +614,9 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// IFF_TUN: 创建三层 IP 设备 而非二层以太网设备
 	// IFF_NO_PI: 不包含数据包信息（避免额外包头）
 	// IFF_VNET_HDR: 启用 virtio 网络头部，支持性能优化和接口状态检测
+	//
 	// IFF_VNET_HDR 启用 "tun status hack" 功能，通过 routineHackListener()
-	// 检测接口状态 - 当向设备写入空数据 返回 EINVAL 时表示 TUN 接口已启用
+	// 检测接口状态 - 当向设备写入空数据 返回 EINVAL 时 表示 TUN 接口已启用
 	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
 
 	// 通过 TUNSETIFF IOCTL 命令 将设置 应用到设备

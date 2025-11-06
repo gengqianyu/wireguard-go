@@ -228,18 +228,19 @@ func (device *Device) RoutineReadFromTUN() {
 
 	device.log.Verbosef("Routine: TUN reader - started")
 
-	// 批量处理准备：根据 BatchSize() 初始化批量处理所需的缓冲区和数据结构
+	// 批量处理准备：根据 BatchSize() 初始化 批量处理所需的缓冲区和数据结构
 	var (
 		batchSize   = device.BatchSize()
 		readErr     error
-		elems       = make([]*QueueOutboundElement, batchSize)
-		bufs        = make([][]byte, batchSize)
-		elemsByPeer = make(map[*Peer]*QueueOutboundElementsContainer, batchSize)
+		elems       = make([]*QueueOutboundElement, batchSize)                   // 出站元素数组，用于批量处理
+		bufs        = make([][]byte, batchSize)                                  // 出站元素缓冲区数组，用于存储要发送的数据包
+		elemsByPeer = make(map[*Peer]*QueueOutboundElementsContainer, batchSize) // 出站元素容器，按 peer 分组
 		count       = 0
-		sizes       = make([]int, batchSize)
-		offset      = MessageTransportHeaderSize
+		sizes       = make([]int, batchSize)     // 出站元素大小数组，用于 存储每个数据包 的大小
+		offset      = MessageTransportHeaderSize // 出站元素偏移量，用于 指向 每个数据包 的有效数据开始位置
 	)
 
+	// 批量处理准备：初始化 出站元素数组 和 缓冲区数组
 	for i := range elems {
 		elems[i] = device.NewOutboundElement()
 		bufs[i] = elems[i].buffer[:]
@@ -250,28 +251,31 @@ func (device *Device) RoutineReadFromTUN() {
 		for _, elem := range elems {
 			if elem != nil {
 				device.PutMessageBuffer(elem.buffer)
-				device.PutOutboundElement(elem)
+				device.PutOutboundElement(elem) // 归还出站元素到对象池
 			}
 		}
 	}()
 
-	// 	Device加工（加密处理）
+	// 	Device加工（加密处理）数据包流程
 
 	// WireGuard设备接收到TUN设备传来的数据包后，会进行以下处理：
-	// 根据目标IP确定对应的对等节点(Peer)
+	// 根据 目标 IP 确定 对应的对等节点(Peer)
 	// 获取当前的加密密钥对(Keypair)
 	// 以下两步是在各自的 peer 中完成的
 	// 使用ChaCha20-Poly1305算法加密数据包
-	// 添加WireGuard头部信息
+	// 添加 WireGuard 头部信息
 
 	for {
-		// read packets 批量读取：从 TUN 设备一次性读取多个数据包以提高效率
+		// 从 tun 设备 读取一个数据包到 缓冲区数组 bufs 中
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
+
+		// 分类数据包，按照 peer 分组 到 peer 对应的 出站元素容器(QueueOutboundElementsContainer) 中
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue //数据包过滤：跳过无效（大小小于1）的数据包
 			}
 
+			// 数据包加工：将 读取到的 有效数据包 复制到对应的 出站元素 的 缓冲区 中
 			elem := elems[i]
 			elem.packet = bufs[i][offset : offset+sizes[i]]
 
@@ -284,7 +288,7 @@ func (device *Device) RoutineReadFromTUN() {
 				if len(elem.packet) < ipv4.HeaderLen {
 					continue
 				}
-				// 目标地址提取：根据 IP 版本提取对应的目标 IP 地址
+				// 目标地址 提取：根据 IP 版本IP长度相关属性 提取对应的目标 IP 地址
 				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
 
 				// Peer 查找：使用 allowedips.Lookup() 根据 目标 IP 地址 找到对应的 Peer
@@ -305,16 +309,21 @@ func (device *Device) RoutineReadFromTUN() {
 			if peer == nil {
 				continue
 			}
+
 			// 按 Peer 分组：将属于同一个 Peer 的 数据包 收集到同一个容器中
+
+			// 初始化 peer 对应 的 出站元素容器(QueueOutboundElementsContainer)
 			elemsForPeer, ok := elemsByPeer[peer]
-			if !ok {
+			if !ok { // 如果未初始化就初始化 peer 对应 的 出站元素容器(QueueOutboundElementsContainer)
 				elemsForPeer = device.GetOutboundElementsContainer()
 				elemsByPeer[peer] = elemsForPeer
 			}
+			// 将数据包 添加到 peer 对应 的 出站元素容器(QueueOutboundElementsContainer) 中的 elems 切片中
 			elemsForPeer.elems = append(elemsForPeer.elems, elem)
-			elems[i] = device.NewOutboundElement()
 
-			// 资源重用：为每个已处理的出站元素重新创建新的元素，以便重用缓冲区
+			// 重置 出站元素：为下一个数据包创建新的 出站元素，以便重用缓冲区
+			elems[i] = device.NewOutboundElement()
+			// 重置 出站元素缓冲区：将 新创建的 出站元素 的 缓冲区 指向 对应的 缓冲区数组 元素
 			bufs[i] = elems[i].buffer[:]
 		}
 
@@ -322,7 +331,7 @@ func (device *Device) RoutineReadFromTUN() {
 		for peer, elemsForPeer := range elemsByPeer {
 			// 运行状态检查：只处理处于运行状态的 Peer 的数据包
 			if peer.isRunning.Load() {
-				// 数据包暂存：调用 StagePackets() 将数据包放入 Peer 的暂存队列
+				// 数据包暂存：调用 StagePackets() 将数据包 放入 Peer 的暂存队列
 				peer.StagePackets(elemsForPeer)
 
 				// 数据包发送：调用 SendStagedPackets() 触发数据包的实际发送过程
@@ -336,7 +345,7 @@ func (device *Device) RoutineReadFromTUN() {
 				device.PutOutboundElementsContainer(elemsForPeer)
 			}
 
-			// 清理映射：处理完成后从映射中删除 Peer 条目
+			// 处理完成后从 map 映射中删除 Peer 条目
 			delete(elemsByPeer, peer)
 		}
 
@@ -364,11 +373,16 @@ func (device *Device) RoutineReadFromTUN() {
 
 func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	for {
+		// 第一个 select 确保了放入新元素的操作具有绝对优先级
+		// 系统会首先尝试将新数据包入队，只有在入队失败（队列已满）时才会考虑清理旧数据
 		select {
 		case peer.queue.staged <- elems:
-			return
+			return // 只要入队成功，就直接返回
 		default:
 		}
+
+		// 第二个 select 专门负责在入队失败时 清理旧资源
+		// 注意: 这里真的会丢数据包，真是不保证数据包不丢失
 		select {
 		case tooOld := <-peer.queue.staged:
 			for _, elem := range tooOld.elems {
@@ -381,7 +395,7 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	}
 }
 
-// 负责处理已经暂存在队列中的数据包，为它们 分配加密参数 并最终发送。
+// 负责处理 已经暂存在队列中的数据包，为它们 分配加密参数 并最终发送。
 // 这个函数是 WireGuard 数据发送路径中的关键环节，连接了 数据包暂存 和 实际加密发送 的过程。
 func (peer *Peer) SendStagedPackets() {
 top:
@@ -416,24 +430,42 @@ top:
 				// 设置 elem.peer 指向当前 Peer
 				elem.peer = peer
 
-				// 通过原子操作 keypair.sendNonce.Add(1) - 1 为每个数据包分配唯一的 nonce 值
+				// 通过原子操作 keypair.sendNonce.Add(1) - 1 为每个数据 包分配唯一的 nonce 值
 				elem.nonce = keypair.sendNonce.Add(1) - 1
 
 				// nonce 超限处理
+				// 当出站数据包的 nonce 值超过安全限制时，将这些数据包隔离并停止发送新的数据包。
+
+				//  Nonce的作用
+				// 在WireGuard中，nonce 是一个单调递增的序号，用于：
+
+				// 防止重放攻击：确保每个加密数据包都有唯一的标识符
+				// 维护加密状态：作为 ChaCha20-Poly1305 加密算法 的输入参数
+				// 确保前向安全性：通过严格的 nonce 管理策略，保障即使长期密钥泄露，过去的通信也无法被解密
+
+				// RejectAfterMessages
+				// 这是一个安全阈值常量，定义了单个密钥对(keypair)可以使用的最大 nonce 值。
+				// 一旦超过这个值，WireGuard 会停止使用 该密钥对 发送新数据，以防止潜在的加密安全风险。
+
 				// 当 nonce 超过限制时，将这些数据包单独收集到 elemsContainerOOO 容器中
 				if elem.nonce >= RejectAfterMessages {
-					// 将 sendNonce 锁定 在限制值 RejectAfterMessages
+					// 如果达到阈值，将该密钥对的sendNonce原子性地设置为RejectAfterMessages，防止继续递增和使用
 					keypair.sendNonce.Store(RejectAfterMessages)
 					if elemsContainerOOO == nil {
 						elemsContainerOOO = peer.device.GetOutboundElementsContainer()
 					}
+					// 隔离处理：
+					// 创建或获取一个elemsContainerOOO容器(Out-Of-Order容器)
+					// 将这些超过阈值的数据包添加到该容器中
 					elemsContainerOOO.elems = append(elemsContainerOOO.elems, elem)
+					// 跳过发送：使用 continue 语句跳过当前数据包的正常发送流程
 					continue
-				} else {
-					// 有效数据包重排：对于有效的数据包，重新组织在原容器中，移除无效包
-					elemsContainer.elems[i] = elem
-					i++
 				}
+
+				// 有效数据包 重排：对于有效的数据包，重新组织在原容器中，移除无效包
+				elemsContainer.elems[i] = elem
+				i++
+
 				// 设置 elem.keypair 指向当前使用的密钥对
 				elem.keypair = keypair
 			}

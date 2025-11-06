@@ -18,8 +18,15 @@ type WaitPool struct {
 }
 
 func NewWaitPool(max uint32, new func() any) *WaitPool {
-	p := &WaitPool{pool: sync.Pool{New: new}, max: max}
-	p.cond = sync.Cond{L: &p.lock}
+	p := &WaitPool{
+		pool: sync.Pool{
+			New: new,
+		},
+		max: max,
+	}
+	p.cond = sync.Cond{
+		L: &p.lock,
+	}
 	return p
 }
 
@@ -32,6 +39,7 @@ func (p *WaitPool) Get() any {
 		p.count++
 		p.lock.Unlock()
 	}
+	// 调用底层对象池的 p.pool.Get() 方法获取实际的资源对象并返回
 	return p.pool.Get()
 }
 

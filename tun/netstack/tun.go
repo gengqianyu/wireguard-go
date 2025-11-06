@@ -158,17 +158,23 @@ func (tun *netTun) Events() <-chan tun.Event {
 	return tun.events
 }
 
+// （tun *netTun) Read 函数是 wireguard-go 项目中 netstack TUN 设备实现的一个核心方法，用于从 虚拟 TUN 设备 读取网络数据包。
 func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
+	// 函数首先从 tun.incomingPacket 通道中尝试接收一个 数据视图 view
 	view, ok := <-tun.incomingPacket
 	if !ok {
 		return 0, os.ErrClosed
 	}
 
+	// 调用数据视图的 Read 方法，将数据读取到调用者提供的第一个缓冲区 buf[0] 中，从指定的偏移量 offset 开始写入
 	n, err := view.Read(buf[0][offset:])
 	if err != nil {
 		return 0, err
 	}
+	// 将实际读取的字节数 n 存储在 sizes[0] 中，供调用者了解每个缓冲区实际写入的数据大小
 	sizes[0] = n
+
+	// 返回 1 表示成功读取了一个数据包
 	return 1, nil
 }
 
@@ -179,12 +185,14 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 			continue
 		}
 
-		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
+		packetBuffer := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(packet),
+		})
 		switch packet[0] >> 4 {
 		case 4:
-			tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
+			tun.ep.InjectInbound(header.IPv4ProtocolNumber, packetBuffer)
 		case 6:
-			tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
+			tun.ep.InjectInbound(header.IPv6ProtocolNumber, packetBuffer)
 		default:
 			return 0, syscall.EAFNOSUPPORT
 		}
