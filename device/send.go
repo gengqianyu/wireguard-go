@@ -216,7 +216,7 @@ func (peer *Peer) keepKeyFreshSending() {
 // 它实现了从 TUN 虚拟网络设备 读取本地应用程序发出的 IP 数据包，
 // 并将这些数据包 准备好 发送到对应的 WireGuard 对等节点。
 // 它连接了 本地网络栈 和 WireGuard 的加密传输层，是整个 VPN 隧道中 数据流 出本地系统 的第一个处理点。
-// 与 Inbound 流量处理 不同，因为 OutBind 流量 是要发送给对应的 peer endpoint 的，
+// 与 Inbound 流量处理 不同，因为 Outbound 流量 是要发送给对应的 peer endpoint 的，
 // 每个 peer 都有一个对应的 outbound queue，和各自的加密 keypair
 // 因此 负责进一步加工发送数据的是 对应的 peer 结构体，不是 device 结构体。
 func (device *Device) RoutineReadFromTUN() {
