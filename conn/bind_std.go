@@ -368,13 +368,21 @@ func (e ErrUDPGSODisabled) Unwrap() error {
 	return e.RetryErr
 }
 
+// 调用链条 RoutineSequentialSender  goroutine -> peer.SendBuffers->peer.device.net.bind.Send(buffers, endpoint)
+// 它负责将批量加密数据包 通过 UDP 协议 发送到指定的 网络端点。
+
+// bufs [][]byte：二维字节切片，表示要发送的多个数据包
+// endpoint Endpoint：目标网络端点，包含了目标 IP 地址和端口信息
 func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 	s.mu.Lock()
-	blackhole := s.blackhole4
-	// 拿到 对应的 监听连接，使用这个连接 发送数据
+	// 拿到 对应协议的 监听连接，使用这个连接 发送数据
 	conn := s.ipv4
+
+	// 获取相关配置：黑洞模式标志、UDP GSO（通用分段卸载）支持标志、批处理写入器等
+	blackhole := s.blackhole4
 	offload := s.ipv4TxOffload
 	br := batchWriter(s.ipv4PC)
+
 	is6 := false
 	if endpoint.DstIP().Is6() {
 		blackhole = s.blackhole6
@@ -385,6 +393,7 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 	}
 	s.mu.Unlock()
 
+	// 如果启用了黑洞模式（丢弃所有出站数据包），则直接返回成功
 	if blackhole {
 		return nil
 	}
@@ -392,10 +401,14 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 		return syscall.EAFNOSUPPORT
 	}
 
+	// 从 对象池中 获取 消息数组 和 UDP地址对象（资源复用优化）
 	msgs := s.getMessages()
 	defer s.putMessages(msgs)
+
 	ua := s.udpAddrPool.Get().(*net.UDPAddr)
 	defer s.udpAddrPool.Put(ua)
+
+	// 根据 IP类型 复制 目标地址信息 到 UDP地址对象
 	if is6 {
 		as16 := endpoint.DstIP().As16()
 		copy(ua.IP, as16[:])
@@ -405,15 +418,20 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 		copy(ua.IP, as4[:])
 		ua.IP = ua.IP[:4]
 	}
+	// 设置目标端口号
 	ua.Port = int(endpoint.(*StdNetEndpoint).Port())
 	var (
 		retried bool
 		err     error
 	)
+
 retry:
+
+	// 函数根据是否启用 UDP GSO 功能，采用两种不同的发送策略：
+	// 如果启用了 UDP GSO 功能，使用 coalesceMessages 函数 将多个数据包 合并为一个 UDP 分段，
+	// 并设置 GSO 大小。
 	if offload {
 		n := coalesceMessages(ua, endpoint.(*StdNetEndpoint), bufs, *msgs, setGSOSize)
-
 		// Bind 接口设计：在 conn.go 中定义的 Bind 接口，其 Open 方法负责在给定端口上创建监听状态，而Send方法则使用 同一个绑定的连接 发送数据。
 		err = s.send(conn, br, (*msgs)[:n])
 		if err != nil && offload && errShouldDisableUDPGSO(err) {
@@ -425,29 +443,42 @@ retry:
 				s.ipv4TxOffload = false
 			}
 			s.mu.Unlock()
+
+			// 如果遇到 GSO 相关错误，会禁用 GSO 并尝试重试
 			retried = true
 			goto retry
 		}
-	} else {
+	} else { // 未启用UDP GSO时的发送
+		// 逐个处理数据包，为 msg 设置目标地址和数据缓冲区
 		for i := range bufs {
 			(*msgs)[i].Addr = ua
 			(*msgs)[i].Buffers[0] = bufs[i]
+			// 设置 mas 消息的 源地址控制信息
 			setSrcControl(&(*msgs)[i].OOB, endpoint.(*StdNetEndpoint))
 		}
+		// 调用内部的 send 方法 批量发送所有数据包
 		err = s.send(conn, br, (*msgs)[:len(bufs)])
 	}
+
+	// 如果发生了GSO重试，返回特定的GSO禁用错误
 	if retried {
 		return ErrUDPGSODisabled{onLaddr: conn.LocalAddr().String(), RetryErr: err}
 	}
+
 	return err
 }
 
+// 虽然函数签名中使用了 ipv6.Message 类型，但实际上它被设计为一个通用发送函数，同时支持 IPv4 和 IPv6 数据包
+// 它位于 整个发送流程的 末端，负责将上层准备好的数据 转换为实际的网络传输操作
+// 共享数据结构：虽然 send 函数参数是 ipv6.Message 类型，但在 Go 的网络实现中，IPv4 和 IPv6 消息共享相似的数据结构，可以通过统一接口处理
+// 运行时适配：在 send 函数内部，通过 msg.Addr.(*net.UDPAddr) 类型断言，统一获取目标地址，而不关心其具体是 IPv4 还是 IPv6
 func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message) error {
 	var (
 		n     int
 		err   error
 		start int
 	)
+	// GSO 合并模式：当启用 GSO 时，通过 coalesceMessages 将多个小包合并为一个大的 GSO 包，然后调用 send 函数一次性发送
 	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
 		for {
 			n, err = pc.WriteBatch(msgs[start:], 0)
@@ -456,12 +487,15 @@ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message
 			}
 			start += n
 		}
-	} else {
-		for _, msg := range msgs {
-			_, _, err = conn.WriteMsgUDP(msg.Buffers[0], msg.OOB, msg.Addr.(*net.UDPAddr))
-			if err != nil {
-				break
-			}
+		return err
+	}
+
+	// 普通发送模式：未启用 GSO 时，逐个设置每个数据包的地址和缓冲区信息，然后通过 send 函数批量发送
+	for _, msg := range msgs {
+		// msg.Addr.(*net.UDPAddr) 这里断言UDP 地址，而不关心具体是 IPv4 还是 IPv6
+		_, _, err = conn.WriteMsgUDP(msg.Buffers[0], msg.OOB, msg.Addr.(*net.UDPAddr))
+		if err != nil {
+			break
 		}
 	}
 	return err

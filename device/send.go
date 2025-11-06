@@ -383,6 +383,7 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 
 		// 第二个 select 专门负责在入队失败时 清理旧资源
 		// 注意: 这里真的会丢数据包，真是不保证数据包不丢失
+		// 每个 peer 机构都有一个 暂存队列(queue.staged)，用于暂存待发送的数据包
 		select {
 		case tooOld := <-peer.queue.staged:
 			for _, elem := range tooOld.elems {
@@ -548,6 +549,7 @@ func calculatePaddingSize(packetSize, mtu int) int {
  * and marks them for sequential consumption (by releasing the mutex)
  *
  * Obs. One instance per core
+ * 加密要经过 conn bind 设置发送到对端 peer 的队列
  */
 func (device *Device) RoutineEncryption(id int) {
 	var paddingZeros [PaddingMultiple]byte
@@ -557,25 +559,42 @@ func (device *Device) RoutineEncryption(id int) {
 	device.log.Verbosef("Routine: encryption worker %d - started", id)
 
 	for elemsContainer := range device.queue.encryption.c {
+		// 从 device.queue.encryption.c 通道 中获取批量的待加密元素容器
+		// 循环处理容器中的每个元素 elem
 		for _, elem := range elemsContainer.elems {
 			// populate header fields
+			// 填充消息头字段
 			header := elem.buffer[:MessageTransportHeaderSize]
 
-			fieldType := header[0:4]
-			fieldReceiver := header[4:8]
-			fieldNonce := header[8:16]
-
+			fieldType := header[0:4] // 消息类型字段（前4字节）：
+			// 值为MessageTransportType(4)
+			// 用于标识这是一个加密传输数据包，区别于握手消息等其他类型
 			binary.LittleEndian.PutUint32(fieldType, MessageTransportType)
+
+			fieldReceiver := header[4:8] // 接收者索引字段（中间4字节）：
+			// 存储elem.keypair.remoteIndex
+			// 用于标识接收方使用的 密钥对 索引，帮助接收端 快速找到 对应的 解密密钥
 			binary.LittleEndian.PutUint32(fieldReceiver, elem.keypair.remoteIndex)
+
+			// Nonce字段（后8字节）：
+			fieldNonce := header[8:16]
+			// 存储 elem.nonce
+			// 用于加密算法的一次性数字，确保 即使相同明文 加密多次 也会产生不同密文
+			// 防止重放攻击，确保每个数据包 都有唯一的加密上下文
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
 			// pad content to multiple of 16
+			// 计算并填充数据，使数据包长度为16字节的倍数（WireGuard 协议要求）
+			// 填充大小 根据数据包实际长度 和 TUN 设备的 MTU 值动态计算
 			paddingSize := calculatePaddingSize(len(elem.packet), int(device.tun.mtu.Load()))
 			elem.packet = append(elem.packet, paddingZeros[:paddingSize]...)
 
 			// encrypt content and release to consumer
 
+			// 准备加密用的 nonce（将 elem.nonce 放入 nonce 数组的后 8 字节）
 			binary.LittleEndian.PutUint64(nonce[4:], elem.nonce)
+			// 使用 elem.keypair.send.Seal() 执行 AEAD 加密（authenticated encryption with associated data）
+			// 会将加密后的密文和协议头 合并 到 elem.packet 中，以便后续 直接发送 到对端
 			elem.packet = elem.keypair.send.Seal(
 				header,
 				nonce[:],
@@ -589,10 +608,12 @@ func (device *Device) RoutineEncryption(id int) {
 
 // 顺序发送处理
 
-// 为 每个对等节点 维护一个专用的发送 goroutine，确保 对单个对等节点的数据包 按顺序处理
-// 避免多 goroutine 并发发送 不同 peer 流量可能导致的竞态条件和资源争用
+// 为 每个对等节点 维护一个专用的 发送 goroutine，确保 对单个对等节点的数据包 按顺序处理
+// 避免多 goroutine 并发发送 不同 peer 流量 可能导致的竞态条件和资源争用
+// 它运行在独立的 goroutine 中，从出站队列接收加密后的数据包并通过网络发送。
 func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device := peer.device
+
 	defer func() {
 		defer device.log.Verbosef("%v - Routine: sequential sender - stopped", peer)
 		peer.stopping.Done()
@@ -602,10 +623,13 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	bufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.outbound.c {
-		bufs = bufs[:0]
+		bufs = bufs[:0] // 将长度重置为0，但是保持底层数组的容量不变，复用内存
 		if elemsContainer == nil {
-			return
+			return // 如果收到 nil 容器，表示需要终止工作线程
 		}
+
+		// 检查 Peer 是否已停止运行
+		// 如果已停止，回收所有相关资源并跳过当前循环
 		if !peer.isRunning.Load() {
 			// peer has been stopped; return re-usable elems to the shared pool.
 			// This is an optimization only. It is possible for the peer to be stopped
@@ -622,22 +646,32 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			device.PutOutboundElementsContainer(elemsContainer)
 			continue
 		}
+
+		// 准备发送数据
 		dataSent := false
+		// 锁定元素容器以确保线程安全
 		elemsContainer.Lock()
+		// 遍历所有元素，将数据包添加到发送缓冲区
 		for _, elem := range elemsContainer.elems {
+			// 标记是否发送了非心跳数据包
 			if len(elem.packet) != MessageKeepaliveSize {
 				dataSent = true
 			}
 			bufs = append(bufs, elem.packet)
 		}
 
+		// 更新各种计时器状态，用于维护 WireGuard 协议的连接状态
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
 
+		// 发送数据包
 		err := peer.SendBuffers(bufs)
+
 		if dataSent {
 			peer.timersDataSent()
 		}
+
+		// 回收资源
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutOutboundElement(elem)

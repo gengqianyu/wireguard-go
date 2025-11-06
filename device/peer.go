@@ -113,27 +113,41 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	return peer, nil
 }
 
+// 此方法负责将批量加密数据包发送到对等节点（peer）
+// 是连接 上层加密逻辑 和 底层网络传输 的重要桥梁。
+// 调用方为 RoutineSequentialSender  goroutine
 func (peer *Peer) SendBuffers(buffers [][]byte) error {
+	// 1 并发控制与设备状态检查
+	// 获取 设备网络 的读锁，确保在 发送过程中网络配置 不会被其他 goroutine 修改
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
 
+	// 检查设备是否已关闭，如果已关闭则直接返回 nil，避免对已关闭设备进行操作
 	if peer.device.isClosed() {
 		return nil
 	}
 
+	// 2 获取 并验证 对等节点的端点信息
+
+	// 获取端点（endpoint）的写锁，确保端点信息在读取过程中的一致性
 	peer.endpoint.Lock()
+	// 检查端点是否存在，如果为 nil，返回错误 "no known endpoint for peer"
 	endpoint := peer.endpoint.val
 	if endpoint == nil {
 		peer.endpoint.Unlock()
 		return errors.New("no known endpoint for peer")
 	}
+	// 处理可能需要清除源地址的情况（clearSrcOnTx 标志）
 	if peer.endpoint.clearSrcOnTx {
 		endpoint.ClearSrc()
 		peer.endpoint.clearSrcOnTx = false
 	}
 	peer.endpoint.Unlock()
 
-	// peer 发送数据到 endpoint
+	// 发送数据到 peer 的 endpoint 端
+	// 通过 设备的网络绑定接口 发送批量数据包到指定端点
+	// peer.device.net.bind 是底层网络绑定实现，负责实际的网络传输
+	// endpoint 包含了目标对等节点的网络地址信息
 	err := peer.device.net.bind.Send(buffers, endpoint)
 	if err == nil {
 		var totalLen uint64
