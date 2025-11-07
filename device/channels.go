@@ -18,6 +18,15 @@ import (
 // When no further writers will be added,
 // call wg.Done to remove the initial reference.
 // When the refcount hits 0, the queue's channel is closed.
+
+// outboundQueue 是一个 channel，用于存放 等待加密的 QueueOutboundElements 元素
+// 出站队列 通过其 wg 字段 进行引用计数。
+// 使用 newOutboundQueue 创建的 outboundQueue 拥有一个引用。
+// 每个新增的写入器都必须调用 wg.Add(1)。
+// 每个完成的写入器必须调用 wg.Done()。
+// 当不再有新的写入器 加入时，
+// 调用 wg.Done 以移除初始引用。
+// 当引用计数达到 0 时，队列的通道将被关闭。
 type outboundQueue struct {
 	c  chan *QueueOutboundElementsContainer
 	wg sync.WaitGroup
