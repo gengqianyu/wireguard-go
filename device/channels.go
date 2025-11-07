@@ -86,8 +86,7 @@ type autodrainingInboundQueue struct {
 
 // newAutodrainingInboundQueue returns a channel that will be drained when it gets GC'd.
 // It is useful in cases in which is it hard to manage the lifetime of the channel.
-// The returned channel must not be closed. Senders should signal shutdown using
-// some other means, such as sending a sentinel nil values.
+// The returned channel must not be closed. Senders should signal shutdown using some other means, such as sending a sentinel nil values.
 func newAutodrainingInboundQueue(device *Device) *autodrainingInboundQueue {
 	q := &autodrainingInboundQueue{
 		c: make(chan *QueueInboundElementsContainer, QueueInboundSize),
