@@ -47,7 +47,7 @@ func warning() {
 	}
 
 	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────┐")
-	fmt.Fprintln(os.Stderr, "│   Warning:                                                   │")
+	fmt.Fprintln(os.Stderr, "│   Warning:                                           │")
 	fmt.Fprintln(os.Stderr, "│   Running wireguard-go is not required because this  │")
 	fmt.Fprintln(os.Stderr, "│   kernel has first class support for WireGuard. For  │")
 	fmt.Fprintln(os.Stderr, "│   information on installing the kernel module,       │")
