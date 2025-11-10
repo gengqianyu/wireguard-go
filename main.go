@@ -204,8 +204,8 @@ func main() {
 
 	if !foreground {
 		env := os.Environ()
-		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
-		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
+		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))             // tun 设备文件描述符，0,1,2 已被标准输入标准输出标准错误占用，因此这里从 3 开始
+		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))            // UAPI socket 文件描述符
 		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND)) // 新进程以前端模式运行
 
 		// 控制新进程的标准输入/输出/错误流
@@ -224,10 +224,10 @@ func main() {
 		// 配置新进程的 文件描述符 表，包括标准流和关键资源文件
 		attr := &os.ProcAttr{
 			Files: []*os.File{
-				files[0], // stdin
-				files[1], // stdout
-				files[2], // stderr
-				tunDevice.File(),
+				files[0],         // stdin
+				files[1],         // stdout
+				files[2],         // stderr
+				tunDevice.File(), //
 				fileUAPI,
 			},
 			Dir: ".", //设置工作目录为当前目录
