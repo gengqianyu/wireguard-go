@@ -57,7 +57,7 @@ func warning() {
 	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────┘")
 }
 
-// sudo LOG_LEVEL=debug go run . -f utun9
+// sudo LOG_LEVEL=debug go run . -f utun8
 func main() {
 	// handle --version flag
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
@@ -206,8 +206,12 @@ func main() {
 		env := os.Environ()
 		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
 		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
-		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
+		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND)) // 新进程以前端模式运行
+
+		// 控制新进程的标准输入/输出/错误流
 		files := [3]*os.File{}
+		// 根据日志级别 决定是否保留 标准输出和标准错误
+		// 标准输入 始终重定向到 /dev/null
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
 			files[0], _ = os.Open(os.DevNull)
 			files[1] = os.Stdout
@@ -217,6 +221,7 @@ func main() {
 			files[1], _ = os.Open(os.DevNull)
 			files[2], _ = os.Open(os.DevNull)
 		}
+		// 配置新进程的 文件描述符 表，包括标准流和关键资源文件
 		attr := &os.ProcAttr{
 			Files: []*os.File{
 				files[0], // stdin
@@ -225,25 +230,28 @@ func main() {
 				tunDevice.File(),
 				fileUAPI,
 			},
-			Dir: ".",
-			Env: env,
+			Dir: ".", //设置工作目录为当前目录
+			Env: env, //传递准备好的环境变量
 		}
 
+		// 获取当前可执行文件路径
 		path, err := os.Executable()
 		if err != nil {
 			logger.Errorf("Failed to determine executable: %v", err)
 			os.Exit(ExitSetupFailed)
 		}
-
+		// 使用相同的程序路径和参数启动新进程
 		process, err := os.StartProcess(
 			path,
 			os.Args,
-			attr,
+			attr, // 通过 attr 参数传递文件描述符和环境变量
 		)
 		if err != nil {
 			logger.Errorf("Failed to daemonize: %v", err)
 			os.Exit(ExitSetupFailed)
 		}
+		// 释放对子进程的资源引用
+		// 父进程直接返回，让子进程在后台继续运行
 		process.Release()
 		return
 	}
