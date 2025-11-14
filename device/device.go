@@ -42,7 +42,7 @@ type Device struct {
 		sync.RWMutex
 		bind          conn.Bind // bind interface
 		netlinkCancel *rwcancel.RWCancel
-		port          uint16 // listening port
+		port          uint16 // listening port 默认为0
 		fwmark        uint32 // mark value (0 = disabled)
 		brokenRoaming bool
 	}
@@ -310,9 +310,11 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	// 创建用于通知设备关闭的通道
 	device.closed = make(chan struct{})
 
-	// 初始化 device 组件，这里通过 device 桥接 TUN 设备和 bind 接口，从而实现数据流
-	device.log = logger           // 设置日志记录器
-	device.net.bind = bind        // 设置网络绑定接口
+	// 初始化 device 组件，这里通过 device 桥接 TUN 设备和 bind 操作抽象，从而实现数据流
+	device.log = logger // 设置日志记录器
+
+	// 初始化 net 组件，net.port 默认为 0,因此后面执行 bind 操作会自动绑定到随机端口
+	device.net.bind = bind        // 设置 bind 用于后面启动 UDP 监听 bind IP+端口
 	device.tun.device = tunDevice // 设置 TUN 设备
 
 	// 获取并设置 TUN 设备的 MTU（最大传输单元）
