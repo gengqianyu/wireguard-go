@@ -125,7 +125,7 @@ func (e *StdNetEndpoint) DstToString() string {
 func listenNet(network string, port int) (*net.UDPConn, int, error) {
 	// 调用 listenConfig() 获取一个配置了平台特定优化的 net.ListenConfig 对象
 	conn, err := listenConfig().
-		// 使用这个配置对象的 ListenPacket 方法 创建一个 UDP 监听(其实是只绑定了端口，并没有向 TCP 那样持续监听某个端口)
+		// 使用这个配置对象的 ListenPacket 方法 创建一个 UDP 监听(其实是只 UDP socket 文件绑定了 IP+端口，并没有向 TCP 那样持续监听某个端口)
 		ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
